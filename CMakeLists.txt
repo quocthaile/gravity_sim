@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+
+project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(glfw3 CONFIG REQUIRED)
+find_package(glm CONFIG REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(OpenGL REQUIRED)
+
+set(GRAVITY_SIM_LIBS
+    glfw
+    GLEW::GLEW
+    glm::glm
+    OpenGL::GL
+)
+
+function(add_gravity_executable target source)
+    add_executable(${target} ${source})
+
+    target_link_libraries(${target} PRIVATE ${GRAVITY_SIM_LIBS})
+
+    target_compile_features(${target} PRIVATE cxx_std_20)
+
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        target_compile_definitions(${target} PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+        )
+    endif()
+
+    if(WIN32)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:${target}>
+                $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
+endfunction()
+
+add_gravity_executable(3d_test 3D_test.cpp)
+add_gravity_executable(gravity_sim gravity_sim.cpp)
+add_gravity_executable(gravity_sim_3Dgrid gravity_sim_3Dgrid.cpp)
+
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
