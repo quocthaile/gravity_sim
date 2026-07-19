@@ -164,7 +164,7 @@ int main() {
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     //projection matrix
-    glm::mat4 projection = glm::perspective(glm::radians(45.0f), 800.0f / 600.0f, 0.1f, 750000.0f);
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
     GLint projectionLoc = glGetUniformLocation(shaderProgram, "projection");
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPos = glm::vec3(0.0f, 1000.0f,  5000.0f);
@@ -285,7 +285,7 @@ GLFWwindow* StartGLU() {
         std::cout << "Failed to initialize GLFW, panic" << std::endl;
         return nullptr;
     }
-    GLFWwindow* window = glfwCreateWindow(800, 600, "3D_TEST", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
     if (!window) {
         std::cerr << "Failed to create GLFW window." << std::endl;
         glfwTerminate();
@@ -301,7 +301,7 @@ GLFWwindow* StartGLU() {
     }
 
     glEnable(GL_DEPTH_TEST);
-    glViewport(0, 0, 800, 600);
+    glViewport(0, 0, 1920, 1080);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Standard blending for transparency
 
@@ -506,116 +506,84 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount) {
     glDrawArrays(GL_LINES, 0, vertexCount / 3);
     glBindVertexArray(0);
 }
+
 std::vector<float> CreateGridVertices(float size, int divisions, const std::vector<Object>& objs) {
-    std::vector<float> vertices;
-    float step = size / divisions;
-    float halfSize = size / 2.0f;
+    if (divisions <= 0) return {};
 
-    // x axis
-    for (int yStep = 3; yStep <= 3; ++yStep) {
-        float y = -halfSize*0.3f + yStep * step;
-        for (int zStep = 0; zStep <= divisions; ++zStep) {
-            float z = -halfSize + zStep * step;
-            for (int xStep = 0; xStep < divisions; ++xStep) {
-                float xStart = -halfSize + xStep * step;
-                float xEnd = xStart + step;
-                vertices.push_back(xStart); vertices.push_back(y); vertices.push_back(z);
-                vertices.push_back(xEnd);   vertices.push_back(y); vertices.push_back(z);
-            }
-        }
-    }
+    struct GridCache 
+    {
+        float size = -1.0f;
+        int divisions = -1;
+        std::vector<float> baseVertices;
+    };
+    static GridCache cache;
 
-    // // yzxis
-    // for (int xStep = 0; xStep <= divisions; ++xStep) {
-    //     float x = -halfSize + xStep * step;
-    //     for (int zStep = 0; zStep <= divisions; ++zStep) {
-    //         float z = -halfSize + zStep * step;s
-    //         for (int yStep = 0; yStep < divisions; ++yStep) {
-    //             float yStart = -halfSize + yStep * step;
-    //             float yEnd = yStart + step;
-    //             vertices.push_back(x); vertices.push_back(yStart); vertices.push_back(z);
-    //             vertices.push_back(x); vertices.push_back(yEnd);   vertices.push_back(z);
-    //         }
-    //     }
-    // }
-
-    // zaxis
-    for (int xStep = 0; xStep <= divisions; ++xStep) {
-        float x = -halfSize + xStep * step;
-        for (int yStep = 3; yStep <= 3; ++yStep) {
-            float y = -halfSize*0.3f + yStep * step;
-            for (int zStep = 0; zStep < divisions; ++zStep) {
-                float zStart = -halfSize + zStep * step;
-                float zEnd = zStart + step;
-                vertices.push_back(x); vertices.push_back(y); vertices.push_back(zStart);
-                vertices.push_back(x); vertices.push_back(y); vertices.push_back(zEnd);
-            }
-        }
-    }
-    
-
-    // displacement
-    // for (int i = 0; i < vertices.size(); i += 3) {
-    //     glm::vec3 vertexPos(vertices[i], vertices[i+1], vertices[i+2]);
-    //     glm::vec3 totalDisplacement(0.0f);
-
-    //     for (const auto& obj : objs) {
-    //         glm::vec3 toObject = obj.GetPos() - vertexPos;
-    //         float distance = glm::length(toObject);
-
-    //         float distance_m = distance * 1000.0f;
-            
-    //         float strength = (G * obj.mass) / (distance_m * distance_m);
-    //         glm::vec3 displacement = glm::normalize(toObject) * strength;
-
-    //         totalDisplacement += -displacement * (2/distance);
-    //     }
-
-    //     vertexPos += totalDisplacement; 
-
-    //     // Update vertex data
-    //     vertices[i]   = vertexPos[0];
-    //     vertices[i+1] = vertexPos[1];
-    //     vertices[i+2] = vertexPos[2];
-    // }
-    float minz = 0.0f;
-    for (int i = 0; i < vertices.size(); i += 3) {
-        glm::vec3 vertexPos(vertices[i], vertices[i+1], vertices[i+2]);
-        glm::vec3 totalDisplacement(0.0f);
+    if (cache.size != size || cache.divisions != divisions) 
+    {
+        cache.size = size;
+        cache.divisions = divisions;
         
+        float step = size / divisions;
+        float halfSize = size / 2.0f;
+        
+        cache.baseVertices.clear();
+        cache.baseVertices.reserve(divisions * 12 + divisions * divisions * 12);
+        // Sinh lưới tĩnh - Trục X
+        for (int yStep = 3; yStep <= 3; ++yStep) 
+        {
+            float y = -halfSize * 0.3f + yStep * step;
+            for (int zStep = 0; zStep <= divisions; ++zStep) 
+            {
+                float z = -halfSize + zStep * step;
+                for (int xStep = 0; xStep < divisions; ++xStep) 
+                {
+                    float xStart = -halfSize + xStep * step;
+                    float xEnd = xStart + step;
+                    cache.baseVertices.push_back(xStart); cache.baseVertices.push_back(y); cache.baseVertices.push_back(z);
+                    cache.baseVertices.push_back(xEnd);   cache.baseVertices.push_back(y); cache.baseVertices.push_back(z);
+                }
+            }
+        }
+        // Sinh lưới tĩnh - Trục Z
+        for (int xStep = 0; xStep <= divisions; ++xStep) 
+        {
+            float x = -halfSize + xStep * step;
+            for (int yStep = 3; yStep <= 3; ++yStep) 
+            {
+                float y = -halfSize * 0.3f + yStep * step;
+                for (int zStep = 0; zStep < divisions; ++zStep) 
+                {
+                    float zStart = -halfSize + zStep * step;
+                    float zEnd = zStart + step;
+                    cache.baseVertices.push_back(x); cache.baseVertices.push_back(y); cache.baseVertices.push_back(zStart);
+                    cache.baseVertices.push_back(x); cache.baseVertices.push_back(y); cache.baseVertices.push_back(zEnd);
+                }
+            }
+        }
+    }
 
-        for (const auto& obj : objs) {
-            glm::vec3 toObject = obj.GetPos() - vertexPos;
-            float distance = glm::length(toObject);
-
+    std::vector<float> vertices = cache.baseVertices;
+    size_t vertexCount = vertices.size();
+    for (size_t i = 0; i < vertexCount; i += 3) 
+    {
+        float vx = vertices[i];
+        float vy = vertices[i + 1];
+        float vz = vertices[i + 2];
+        float totalDisplacement = 0.0f;
+        for (const auto& obj : objs) 
+        {
+            float dx = obj.position.x - vx;
+            float dy = obj.position.y - vy;
+            float dz = obj.position.z - vz;
+            
+            float distance = sqrt(dx * dx + dy * dy + dz * dz);
             float distance_m = distance * 1000.0f;
-            float rs = (2*G*obj.mass)/(c*c);
 
-            float z = 2 * sqrt(rs*(distance_m - rs)) * 100.0f;
-            totalDisplacement += z;
-            
-
+            float rs = rs = (2 * G * obj.mass) / (c * c);
+            float z_disp = 2.0f * sqrt(rs * (distance_m - rs)) * 100.0f;
+            totalDisplacement += z_disp;
         }
-        
-        vertexPos += totalDisplacement; 
-
-         vertices[i+1] = vertexPos[1] / 15.0f - 3000.0f;
+        vertices[i + 1] = (vy + totalDisplacement) / 15.0f - 3000.0f;
     }
-    
-
     return vertices;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
