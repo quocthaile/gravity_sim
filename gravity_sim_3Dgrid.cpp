@@ -62,6 +62,7 @@ class Object {
         float mass;
         float density;  // kg / m^3  HYDROGEN
         float radius;
+        float rs;
 
         glm::vec3 LastPos = position;
 
@@ -71,6 +72,7 @@ class Object {
             this->mass = mass;
             this->density = density;
             this->radius = pow(((3 * this->mass/this->density)/(4 * 3.14159265359)), (1.0f/3.0f)) / 100000;
+			this->rs = (2 * G * this->mass) / (c * c);
             
 
             // Generate vertices (centered at origin)
@@ -563,6 +565,9 @@ std::vector<float> CreateGridVertices(float size, int divisions, const std::vect
     }
 
     std::vector<float> vertices = cache.baseVertices;
+    
+    
+    
     size_t vertexCount = vertices.size();
     for (size_t i = 0; i < vertexCount; i += 3) 
     {
@@ -576,11 +581,11 @@ std::vector<float> CreateGridVertices(float size, int divisions, const std::vect
             float dy = obj.position.y - vy;
             float dz = obj.position.z - vz;
             
-            float distance = sqrt(dx * dx + dy * dy + dz * dz);
+            float distance = sqrt(dx * dx + dy * dy + dz * dz); 
             float distance_m = distance * 1000.0f;
 
-            float rs = rs = (2 * G * obj.mass) / (c * c);
-            float z_disp = 2.0f * sqrt(rs * (distance_m - rs)) * 100.0f;
+            //float rs = (2 * G * obj.mass) / (c * c);
+            float z_disp = 200.0f * sqrt(obj.rs * (distance_m - obj.rs));
             totalDisplacement += z_disp;
         }
         vertices[i + 1] = (vy + totalDisplacement) / 15.0f - 3000.0f;
