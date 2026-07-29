@@ -45,7 +45,7 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 glm::vec3 sphericalToCartesian(float r, float theta, float phi);
 void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount);
-
+std::vector<unsigned int> CreateGridIndices(int divisions);
 
 class Object {
     public:
@@ -150,8 +150,8 @@ std::vector<Object> objs = {};
 
 std::vector<float> CreateGridVertices(float size, int divisions, const std::vector<Object>& objs);
 
-GLuint gridVAO, gridVBO; // 100x100 grid with 10 divisions
-
+GLuint gridVAO, gridVBO, gridEBO;
+size_t gridIndexCount = 0;
 
 int main() {
     GLFWwindow* window = StartGLU();
@@ -176,10 +176,27 @@ int main() {
         Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309*pow(10, 22), 3344),
         // Object(glm::vec3(-250, 0, 0), glm::vec3(0, -50, 0), 7.34767309*pow(10, 22), 3344),
         Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
-
     };
     std::vector<float> gridVertices = CreateGridVertices(100000.0f, 50, objs);
     CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
+    // 1. Tạo danh sách chỉ số cho lưới
+    std::vector<unsigned int> gridIndices = CreateGridIndices(50);
+    gridIndexCount = gridIndices.size();
+    // 2. Thiết lập VAO, VBO, EBO
+    glGenVertexArrays(1, &gridVAO);
+    glGenBuffers(1, &gridVBO);      
+    glGenBuffers(1, &gridEBO);
+    glBindVertexArray(gridVAO);
+    // VBO: Chứa vị trí các đỉnh độc lập
+    glBindBuffer(GL_ARRAY_BUFFER, gridVBO); 
+    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_DYNAMIC_DRAW);
+    // EBO: Chứa sơ đồ nối chỉ số
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int), gridIndices.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0); 
+    glBindVertexArray(0);
+
     std::cout<<"Earth radius: "<<objs[1].radius<<std::endl;
     std::cout<<"Moon radius: "<<objs[0].radius<<std::endl;
 
@@ -216,8 +233,8 @@ int main() {
         gridVertices = CreateGridVertices(10000.0f, 50, objs);
         glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
         glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_DYNAMIC_DRAW);
-        DrawGrid(shaderProgram, gridVAO, gridVertices.size());
-
+        // DrawGrid(shaderProgram, gridVAO, gridVertices.size());
+        DrawGrid(shaderProgram, gridVAO, gridIndexCount);
         // Draw the triangle
         for(auto& obj : objs) {
             glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
@@ -497,7 +514,7 @@ glm::vec3 sphericalToCartesian(float r, float theta, float phi){
     float z = r * sin(theta) * sin(phi);
     return glm::vec3(x, y, z);
 };
-void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount) {
+void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount) {
     glUseProgram(shaderProgram);
     glm::mat4 model = glm::mat4(1.0f); // Identity matrix for the grid
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
@@ -505,90 +522,92 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount) {
 
     glBindVertexArray(gridVAO);
     glPointSize(5.0f);
-    glDrawArrays(GL_LINES, 0, vertexCount / 3);
+    // glDrawArrays(GL_LINES, 0, vertexCount / 3);
+    glDrawElements(GL_LINES, static_cast<GLsizei>(indexCount), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
 
 std::vector<float> CreateGridVertices(float size, int divisions, const std::vector<Object>& objs) {
-    if (divisions <= 0) return {};
+    std::vector<float> vertices;
+    
+    int numNodesPerSide = divisions + 1;
+    // Cấp phát trước bộ nhớ cho (N+1)^2 đỉnh, mỗi đỉnh gồm 3 tọa độ (x, y, z)
+    vertices.reserve(numNodesPerSide * numNodesPerSide * 3);
 
-    struct GridCache 
-    {
-        float size = -1.0f;
-        int divisions = -1;
-        std::vector<float> baseVertices;
-    };
-    static GridCache cache;
+    float step = size / divisions;
+    float halfSize = size / 2.0f;
+    float baseY = -halfSize * 0.3f; // Cao độ phẳng ban đầu của lưới
 
-    if (cache.size != size || cache.divisions != divisions) 
-    {
-        cache.size = size;
-        cache.divisions = divisions;
-        
-        float step = size / divisions;
-        float halfSize = size / 2.0f;
-        
-        cache.baseVertices.clear();
-        cache.baseVertices.reserve(divisions * 12 + divisions * divisions * 12);
-        // Sinh lưới tĩnh - Trục X
-        for (int yStep = 3; yStep <= 3; ++yStep) 
-        {
-            float y = -halfSize * 0.3f + yStep * step;
-            for (int zStep = 0; zStep <= divisions; ++zStep) 
-            {
-                float z = -halfSize + zStep * step;
-                for (int xStep = 0; xStep < divisions; ++xStep) 
-                {
-                    float xStart = -halfSize + xStep * step;
-                    float xEnd = xStart + step;
-                    cache.baseVertices.push_back(xStart); cache.baseVertices.push_back(y); cache.baseVertices.push_back(z);
-                    cache.baseVertices.push_back(xEnd);   cache.baseVertices.push_back(y); cache.baseVertices.push_back(z);
-                }
-            }
-        }
-        // Sinh lưới tĩnh - Trục Z
-        for (int xStep = 0; xStep <= divisions; ++xStep) 
-        {
+    // 1. Áp dụng Linspace: Tạo ma trận điểm nút độc lập (Grid Nodes)
+    for (int zStep = 0; zStep <= divisions; ++zStep) {
+        float z = -halfSize + zStep * step;
+        for (int xStep = 0; xStep <= divisions; ++xStep) {
             float x = -halfSize + xStep * step;
-            for (int yStep = 3; yStep <= 3; ++yStep) 
-            {
-                float y = -halfSize * 0.3f + yStep * step;
-                for (int zStep = 0; zStep < divisions; ++zStep) 
-                {
-                    float zStart = -halfSize + zStep * step;
-                    float zEnd = zStart + step;
-                    cache.baseVertices.push_back(x); cache.baseVertices.push_back(y); cache.baseVertices.push_back(zStart);
-                    cache.baseVertices.push_back(x); cache.baseVertices.push_back(y); cache.baseVertices.push_back(zEnd);
+
+            glm::vec3 vertexPos(x, baseY, z);
+            float totalDisplacement = 0.0f;
+
+            // 2. Tính toán độ cong không-thời-gian Schwarzschild cho duy nhất 1 Node
+            for (const auto& obj : objs) {
+                glm::vec3 toObject = obj.GetPos() - vertexPos; 
+                float distance = glm::length(toObject);        
+                float distance_m = distance * 1000.0f;          
+                
+                // Bán kính Schwarzschild
+                // float rs = (2.0f * G * obj.mass) / (c * c);     
+
+                // Kiểm tra an toàn tránh căn bậc hai số âm (NaN)
+                if (distance_m > obj.rs) {
+                    float z_disp = 200.0f * std::sqrt(obj.rs * (distance_m - obj.rs));
+                    totalDisplacement += z_disp;
                 }
             }
+
+            // Cập nhật cao độ Y theo lực hấp dẫn
+            float finalY = (vertexPos.y + totalDisplacement) / 15.0f - 3000.0f;
+
+            // Lưu đỉnh duy nhất vào mảng
+            vertices.push_back(x);
+            vertices.push_back(finalY);
+            vertices.push_back(z);
         }
     }
 
-    std::vector<float> vertices = cache.baseVertices;
-    
-    
-    
-    size_t vertexCount = vertices.size();
-    for (size_t i = 0; i < vertexCount; i += 3) 
-    {
-        float vx = vertices[i];
-        float vy = vertices[i + 1];
-        float vz = vertices[i + 2];
-        float totalDisplacement = 0.0f;
-        for (const auto& obj : objs) 
-        {
-            float dx = obj.position.x - vx;
-            float dy = obj.position.y - vy;
-            float dz = obj.position.z - vz;
-            
-            float distance = sqrt(dx * dx + dy * dy + dz * dz); 
-            float distance_m = distance * 1000.0f;
-
-            //float rs = (2 * G * obj.mass) / (c * c);
-            float z_disp = 200.0f * sqrt(obj.rs * (distance_m - obj.rs));
-            totalDisplacement += z_disp;
-        }
-        vertices[i + 1] = (vy + totalDisplacement) / 15.0f - 3000.0f;
-    }
     return vertices;
+};
+std::vector<unsigned int> CreateGridIndices(int divisions) {
+    std::vector<unsigned int> indices;
+    int rowSize = divisions + 1;
+
+    // Đường ngang (Horizontal)
+    for (int z = 0; z <= divisions; ++z) {
+        for (int x = 0; x < divisions; ++x) {
+            int current = z * rowSize + x;
+            indices.push_back(current);
+            indices.push_back(current + 1);
+        }
+    }
+
+    // Đường dọc (Vertical)
+    for (int z = 0; z < divisions; ++z) {
+        for (int x = 0; x <= divisions; ++x) {
+            int current = z * rowSize + x; // index
+            indices.push_back(current);
+            indices.push_back(current + rowSize);
+        }
+    }
+
+    return indices;
 }
+// z = 0, x = 0 => curent  = 0x4 + 0 = 0 ----- 0/1
+// z = 0, x = 1 => curent  = 0x4 + 1 = 1 ----- 1/2
+// z = 0, x = 2 => curent  = 0x4 + 2 = 2 ----- 2/3
+
+// z=0 ->z<3
+// z = 0, x = 0 => curent  = 0x4 + 0 = 0 ----- 0/4
+// z = 0, x = 1 => curent  = 0x4 + 1 = 1 ----- 1/2
+// z = 0, x = 2 => curent  = 0x4 + 2 = 2 ----- 2/3
+// z = 0, x = 3 => curent  = 0x4 + 3 = 3 ----- 3/4
+
+// x = 0, z = 0 => current = 0*4 + 0 = 0 ----- 0/1
+// x = 0, z = 1 => current = 0*4 + 1 = 1 ----- 1/2
