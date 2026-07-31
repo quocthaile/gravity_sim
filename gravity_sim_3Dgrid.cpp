@@ -6,9 +6,42 @@
 #include <vector>
 #include <iostream>
 
-const char* vertexShaderSource = R"glsl(#version 330 core
-layout(location=0)in vec3 aPos;uniform mat4 model;uniform mat4 view;uniform mat4 projection;
-void main(){gl_Position=projection*view*model*vec4(aPos,1.0);})glsl";
+const char* vertexShaderSource = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+#define MAX_OBJS 16
+uniform vec3 u_objPos[MAX_OBJS];
+uniform float u_objRs[MAX_OBJS];
+uniform int u_numObjs;
+
+uniform bool u_isGrid; 
+
+void main() 
+{
+    vec3 vertexPos = aPos;
+    if (u_isGrid) 
+    {
+        float totalDisplacement = 0.0;
+        for(int i = 0; i < u_numObjs; ++i) 
+        {
+            vec3 toObject = u_objPos[i] - vertexPos;
+            float distance_m = length(toObject) * 1000.0;
+            
+            if (distance_m > u_objRs[i] && u_objRs[i] > 0.0) 
+            {
+                totalDisplacement += 200.0 * sqrt(u_objRs[i] * (distance_m - u_objRs[i]));
+            }
+        }
+        vertexPos.y = (totalDisplacement / 15.0f) - 3000.0f;
+    }
+    gl_Position = projection * view * model * vec4(vertexPos, 1.0);
+}
+)glsl";
 
 const char* fragmentShaderSource = R"glsl(
 #version 330 core
@@ -30,7 +63,7 @@ float pitch =0.0;
 float deltaTime = 0.0;
 float lastFrame = 0.0;
 
-const double G = 6.6743e-11; // m^3 kg^-1 s^-2
+const double G = 6.6743e-11;
 const float c = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
 
@@ -60,7 +93,7 @@ class Object {
         bool target = false;
 
         float mass;
-        float density;  // kg / m^3  HYDROGEN
+        float density;
         float radius;
         float rs;
 
@@ -73,8 +106,6 @@ class Object {
             this->density = density;
             this->radius = pow(((3 * this->mass/this->density)/(4 * 3.14159265359)), (1.0f/3.0f)) / 100000;
 			this->rs = (2 * G * this->mass) / (c * c);
-            
-
             // Generate vertices (centered at origin)
             std::vector<float> vertices = Draw();
             vertexCount = vertices.size();
@@ -147,8 +178,7 @@ class Object {
         }
 };
 std::vector<Object> objs = {};
-
-std::vector<float> CreateGridVertices(float size, int divisions, const std::vector<Object>& objs);
+std::vector<float> CreateGridVertices(float size, int divisions);
 
 GLuint gridVAO, gridVBO, gridEBO;
 size_t gridIndexCount = 0;
@@ -177,25 +207,36 @@ int main() {
         // Object(glm::vec3(-250, 0, 0), glm::vec3(0, -50, 0), 7.34767309*pow(10, 22), 3344),
         Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
     };
-    std::vector<float> gridVertices = CreateGridVertices(100000.0f, 50, objs);
+
+    float gridSize = 10000.0f;
+    int gridDivisions = 50;
+    std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
     CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
-    // 1. Tạo danh sách chỉ số cho lưới
+
     std::vector<unsigned int> gridIndices = CreateGridIndices(50);
     gridIndexCount = gridIndices.size();
-    // 2. Thiết lập VAO, VBO, EBO
+
     glGenVertexArrays(1, &gridVAO);
-    glGenBuffers(1, &gridVBO);      
+    glGenBuffers(1, &gridVBO);
     glGenBuffers(1, &gridEBO);
+
     glBindVertexArray(gridVAO);
-    // VBO: Chứa vị trí các đỉnh độc lập
-    glBindBuffer(GL_ARRAY_BUFFER, gridVBO); 
-    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_DYNAMIC_DRAW);
-    // EBO: Chứa sơ đồ nối chỉ số
+
+    glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
+    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_STATIC_DRAW);
+
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int), gridIndices.data(), GL_STATIC_DRAW);
+
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0); 
+    glEnableVertexAttribArray(0);
     glBindVertexArray(0);
+
+    // Lấy vị trí Uniforms
+    GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
+    GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
+    GLint objPosLoc = glGetUniformLocation(shaderProgram, "u_objPos");
+    GLint objRsLoc = glGetUniformLocation(shaderProgram, "u_objRs");
 
     std::cout<<"Earth radius: "<<objs[1].radius<<std::endl;
     std::cout<<"Moon radius: "<<objs[0].radius<<std::endl;
@@ -229,13 +270,32 @@ int main() {
 
         // Draw the grid
         glUseProgram(shaderProgram);
-        glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f); // White color with 50% transparency for the grid
-        gridVertices = CreateGridVertices(10000.0f, 50, objs);
-        glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-        glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_DYNAMIC_DRAW);
-        // DrawGrid(shaderProgram, gridVAO, gridVertices.size());
+        glUniform1i(isGridLoc, 1);
+        // 1. Thu thập dữ liệu vị trí và bán kính rs của các vật thể hiện tại
+        std::vector<glm::vec3> positions;
+        std::vector<float> rsValues;
+
+        for (const auto& obj : objs) {
+            positions.push_back(obj.GetPos());
+            rsValues.push_back(obj.rs);
+        }
+
+        int activeObjs = static_cast<int>(positions.size());
+        if (activeObjs > 16) activeObjs = 16; // Giới hạn theo MAX_OBJS trong Shader
+
+        // 2. Truyền dữ liệu sang GPU (Chỉ tốn vài kilobyte truyền dữ liệu Uniform)
+        glUniform1i(numObjsLoc, activeObjs);
+        if (activeObjs > 0) {
+            glUniform3fv(objPosLoc, activeObjs, glm::value_ptr(positions[0]));
+            glUniform1fv(objRsLoc, activeObjs, rsValues.data());
+        }
+
+        // 3. Vẽ lưới - GPU sẽ tự động làm biến dạng lưới trong Vertex Shader
+        glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
         DrawGrid(shaderProgram, gridVAO, gridIndexCount);
+        glUniform1i(isGridLoc, 0);
         // Draw the triangle
+        float epsilon = 10.0f;
         for(auto& obj : objs) {
             glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 
@@ -249,7 +309,8 @@ int main() {
                     if (distance > 0) {
                         std::vector<float> direction = {dx / distance, dy / distance, dz / distance};
                         distance *= 1000;
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
+                        //double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
+                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance + epsilon * epsilon);
                         
 
                         float acc1 = Gforce / obj.mass;
@@ -523,56 +584,32 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount) {
     glBindVertexArray(gridVAO);
     glPointSize(5.0f);
     // glDrawArrays(GL_LINES, 0, vertexCount / 3);
-    glDrawElements(GL_LINES, static_cast<GLsizei>(indexCount), GL_UNSIGNED_INT, 0);
+    glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
 
-std::vector<float> CreateGridVertices(float size, int divisions, const std::vector<Object>& objs) {
+std::vector<float> CreateGridVertices(float size, int divisions) {
     std::vector<float> vertices;
-    
     int numNodesPerSide = divisions + 1;
-    // Cấp phát trước bộ nhớ cho (N+1)^2 đỉnh, mỗi đỉnh gồm 3 tọa độ (x, y, z)
     vertices.reserve(numNodesPerSide * numNodesPerSide * 3);
 
     float step = size / divisions;
     float halfSize = size / 2.0f;
-    float baseY = -halfSize * 0.3f; // Cao độ phẳng ban đầu của lưới
+    // Áp dụng độ lệch không gian -900.0f để né điểm kỳ dị Schwarzschild
+    // Khi dữ liệu được nạp vào VRAM, thuộc tính aPos.y của mọi đỉnh lưới sẽ khởi tạo với giá trị $ - 900.0$.
+    // Phép toán vector nội suy vec3 toObject = u_objPos[i] - vertexPos; 
+    // bên trong GPU sẽ tự động duy trì khoảng cách không gian tối thiểu là 900 đơn vị theo trục tung
+    float baseY = -900.0f;
 
-    // 1. Áp dụng Linspace: Tạo ma trận điểm nút độc lập (Grid Nodes)
     for (int zStep = 0; zStep <= divisions; ++zStep) {
         float z = -halfSize + zStep * step;
         for (int xStep = 0; xStep <= divisions; ++xStep) {
             float x = -halfSize + xStep * step;
-
-            glm::vec3 vertexPos(x, baseY, z);
-            float totalDisplacement = 0.0f;
-
-            // 2. Tính toán độ cong không-thời-gian Schwarzschild cho duy nhất 1 Node
-            for (const auto& obj : objs) {
-                glm::vec3 toObject = obj.GetPos() - vertexPos; 
-                float distance = glm::length(toObject);        
-                float distance_m = distance * 1000.0f;          
-                
-                // Bán kính Schwarzschild
-                // float rs = (2.0f * G * obj.mass) / (c * c);     
-
-                // Kiểm tra an toàn tránh căn bậc hai số âm (NaN)
-                if (distance_m > obj.rs) {
-                    float z_disp = 200.0f * std::sqrt(obj.rs * (distance_m - obj.rs));
-                    totalDisplacement += z_disp;
-                }
-            }
-
-            // Cập nhật cao độ Y theo lực hấp dẫn
-            float finalY = (vertexPos.y + totalDisplacement) / 15.0f - 3000.0f;
-
-            // Lưu đỉnh duy nhất vào mảng
             vertices.push_back(x);
-            vertices.push_back(finalY);
+            vertices.push_back(baseY);
             vertices.push_back(z);
         }
     }
-
     return vertices;
 };
 std::vector<unsigned int> CreateGridIndices(int divisions) {
