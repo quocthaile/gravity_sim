@@ -77,6 +77,10 @@ const double G = 6.6743e-11;
 const float c = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
 
+int numRandomObjects = 100;
+float gridSize = 30000.0f;
+int gridDivisions = 200;
+
 GLFWwindow* StartGLU();
 GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource);
 void CreateVBOVAO(GLuint& VAO, GLuint& VBO, const float* vertices, size_t vertexCount);
@@ -254,17 +258,14 @@ int main() {
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPos = glm::vec3(0.0f, 1000.0f,  5000.0f);
 
-    
     objs = {
         Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309*pow(10, 22), 3344),
         Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
     };
 
-    auto randomBodies = CreateRandomOrbiters(100, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    auto randomBodies = CreateRandomOrbiters(numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
 
-    float gridSize = 20000.0f;
-    int gridDivisions = 100;
     std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
     CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
 
