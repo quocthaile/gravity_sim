@@ -17,8 +17,7 @@ uniform mat4 view;
 uniform mat4 projection;
 
 #define MAX_OBJS 128
-uniform vec3 u_objPos[MAX_OBJS];
-uniform float u_objRs[MAX_OBJS];
+uniform vec4 u_objData[MAX_OBJS];
 uniform int u_numObjs;
 
 uniform bool u_isGrid; 
@@ -31,18 +30,20 @@ void main()
         float totalDisplacement = 0.0;
         for(int i = 0; i < u_numObjs; ++i) 
         {
-            vec3 toObject = u_objPos[i] - vertexPos;
+            vec3 objPos = u_objData[i].xyz;
+            float objRs = u_objData[i].w;
+            vec3 toObject = objPos - vertexPos;
             float distance_m = length(toObject) * 1000.0;
             
             // Hàm max() đảm bảo khoảng cách tính toán không nhỏ hơn bán kính Schwarzschild
             // Ngăn chặn lỗi chia cho 0 tại điểm kỳ dị (singularity)
-            distance_m = max(distance_m, u_objRs[i] * 1.0001); 
+            distance_m = max(distance_m, objRs * 1.0001); 
             
-            if (u_objRs[i] > 0.0) 
+            if (objRs > 0.0) 
             {
                 // Áp dụng mô hình Newtonian potential
                 // Hệ số 2.0e11 là scaling factor để trực quan hóa độ sâu của hố trọng lực
-                totalDisplacement -= (2.0e11 * u_objRs[i]) / distance_m;
+                totalDisplacement -= (2.0e11 * objRs) / distance_m;
             }
         }
         
@@ -202,7 +203,7 @@ std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3& center, flo
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
     std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
-    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e22f);
+    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
     std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
     std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
 
@@ -291,8 +292,7 @@ int main() {
     // Lấy vị trí Uniforms
     GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
     GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
-    GLint objPosLoc = glGetUniformLocation(shaderProgram, "u_objPos");
-    GLint objRsLoc = glGetUniformLocation(shaderProgram, "u_objRs");
+    GLint objDataLoc = glGetUniformLocation(shaderProgram, "u_objData");
 
     std::cout<<"Earth radius: "<<objs[1].radius<<std::endl;
     std::cout<<"Moon radius: "<<objs[0].radius<<std::endl;
@@ -329,11 +329,11 @@ int main() {
         glUniform1i(isGridLoc, 1);
         // 1. Thu thập dữ liệu vị trí và bán kính rs của các vật thể hiện tại
         std::vector<glm::vec3> positions;
-        std::vector<float> rsValues;
+        std::vector<glm::vec4> objectData;
 
         for (const auto& obj : objs) {
             positions.push_back(obj.GetPos());
-            rsValues.push_back(obj.rs);
+            objectData.emplace_back(obj.GetPos(), obj.rs);
         }
 
         int activeObjs = static_cast<int>(positions.size());
@@ -342,8 +342,7 @@ int main() {
         // 2. Truyền dữ liệu sang GPU (Chỉ tốn vài kilobyte truyền dữ liệu Uniform)
         glUniform1i(numObjsLoc, activeObjs);
         if (activeObjs > 0) {
-            glUniform3fv(objPosLoc, activeObjs, glm::value_ptr(positions[0]));
-            glUniform1fv(objRsLoc, activeObjs, rsValues.data());
+            glUniform4fv(objDataLoc, activeObjs, glm::value_ptr(objectData[0]));
         }
 
         // 3. Vẽ lưới - GPU sẽ tự động làm biến dạng lưới trong Vertex Shader
