@@ -5,16 +5,18 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <vector>
 #include <iostream>
+#include <cmath>
+#include <random>
 
 const char* vertexShaderSource = R"glsl(
 #version 330 core
-layout(location = 0) in vec3 aPos;
+layout(location = 0) in vec3 aPos; //layout + in: vị trí nhận dữ liệu kênh 0
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
-#define MAX_OBJS 16
+#define MAX_OBJS 128
 uniform vec3 u_objPos[MAX_OBJS];
 uniform float u_objRs[MAX_OBJS];
 uniform int u_numObjs;
@@ -32,12 +34,20 @@ void main()
             vec3 toObject = u_objPos[i] - vertexPos;
             float distance_m = length(toObject) * 1000.0;
             
-            if (distance_m > u_objRs[i] && u_objRs[i] > 0.0) 
+            // Hàm max() đảm bảo khoảng cách tính toán không nhỏ hơn bán kính Schwarzschild
+            // Ngăn chặn lỗi chia cho 0 tại điểm kỳ dị (singularity)
+            distance_m = max(distance_m, u_objRs[i] * 1.0001); 
+            
+            if (u_objRs[i] > 0.0) 
             {
-                totalDisplacement += 200.0 * sqrt(u_objRs[i] * (distance_m - u_objRs[i]));
+                // Áp dụng mô hình Newtonian potential
+                // Hệ số 2.0e11 là scaling factor để trực quan hóa độ sâu của hố trọng lực
+                totalDisplacement -= (2.0e11 * u_objRs[i]) / distance_m;
             }
         }
-        vertexPos.y = (totalDisplacement / 15.0f) - 3000.0f;
+        
+        // Cộng dồn biến dạng âm vào tọa độ Y gốc (-900.0f) thay vì gán đè toàn bộ
+        vertexPos.y = aPos.y + totalDisplacement;
     }
     gl_Position = projection * view * model * vec4(vertexPos, 1.0);
 }
@@ -179,9 +189,52 @@ class Object {
 };
 std::vector<Object> objs = {};
 std::vector<float> CreateGridVertices(float size, int divisions);
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3& center, float centralMass);
 
 GLuint gridVAO, gridVBO, gridEBO;
 size_t gridIndexCount = 0;
+
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3& center, float centralMass) {
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
+    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e22f);
+    std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
+    std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
+
+    std::vector<Object> generated;
+    generated.reserve(count);
+
+    for (int i = 0; i < count; ++i) {
+        float radius = radiusDist(rng);
+        float angle = angleDist(rng);
+        float tilt = tiltDist(rng);
+        float orbitalSpeed = speedDist(rng);
+
+        glm::vec3 position(
+            center.x + radius * std::cos(angle),
+            center.y + radius * tilt,
+            center.z + radius * std::sin(angle)
+        );
+
+        glm::vec3 velocity(
+            -std::sin(angle) * orbitalSpeed,
+            0.0f,
+            std::cos(angle) * orbitalSpeed
+        );
+
+        float mass = massDist(rng);
+        generated.emplace_back(position, velocity, mass, 3344.0f);
+        generated.back().color = glm::vec4(
+            0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
+            0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
+            0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f,
+            1.0f
+        );
+    }
+
+    return generated;
+}
 
 int main() {
     GLFWwindow* window = StartGLU();
@@ -204,16 +257,18 @@ int main() {
     
     objs = {
         Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309*pow(10, 22), 3344),
-        // Object(glm::vec3(-250, 0, 0), glm::vec3(0, -50, 0), 7.34767309*pow(10, 22), 3344),
         Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
     };
 
-    float gridSize = 10000.0f;
-    int gridDivisions = 50;
+    auto randomBodies = CreateRandomOrbiters(100, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
+
+    float gridSize = 20000.0f;
+    int gridDivisions = 100;
     std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
     CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
 
-    std::vector<unsigned int> gridIndices = CreateGridIndices(50);
+    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     gridIndexCount = gridIndices.size();
 
     glGenVertexArrays(1, &gridVAO);
@@ -281,7 +336,7 @@ int main() {
         }
 
         int activeObjs = static_cast<int>(positions.size());
-        if (activeObjs > 16) activeObjs = 16; // Giới hạn theo MAX_OBJS trong Shader
+        if (activeObjs > 128) activeObjs = 128; // Giới hạn theo MAX_OBJS trong Shader
 
         // 2. Truyền dữ liệu sang GPU (Chỉ tốn vài kilobyte truyền dữ liệu Uniform)
         glUniform1i(numObjsLoc, activeObjs);
@@ -615,7 +670,12 @@ std::vector<float> CreateGridVertices(float size, int divisions) {
 std::vector<unsigned int> CreateGridIndices(int divisions) {
     std::vector<unsigned int> indices;
     int rowSize = divisions + 1;
-
+    // Tính toán trước tổng số lượng index
+    // Số cạnh ngang: divisions * (divisions + 1)
+    // Số cạnh dọc: divisions * (divisions + 1)
+    // Mỗi cạnh cần 2 indices, tổng cộng: 4 * divisions * (divisions + 1)
+    size_t totalIndices = 4 * divisions * (divisions + 1);
+    indices.reserve(totalIndices);
     // Đường ngang (Horizontal)
     for (int z = 0; z <= divisions; ++z) {
         for (int x = 0; x < divisions; ++x) {
@@ -624,7 +684,6 @@ std::vector<unsigned int> CreateGridIndices(int divisions) {
             indices.push_back(current + 1);
         }
     }
-
     // Đường dọc (Vertical)
     for (int z = 0; z < divisions; ++z) {
         for (int x = 0; x <= divisions; ++x) {
