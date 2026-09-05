@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -21,9 +21,13 @@ set(GRAVITY_SIM_LIBS
 function(add_gravity_executable target source)
     add_executable(${target} ${source})
 
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
     target_link_libraries(${target} PRIVATE ${GRAVITY_SIM_LIBS})
 
-    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_features(${target} PRIVATE cxx_std_23)
 
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -31,6 +35,8 @@ function(add_gravity_executable target source)
             WIN32_LEAN_AND_MEAN
             NOMINMAX
         )
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra)
     endif()
 
     if(WIN32)
@@ -43,8 +49,8 @@ function(add_gravity_executable target source)
     endif()
 endfunction()
 
-add_gravity_executable(3d_test 3D_test.cpp)
-add_gravity_executable(gravity_sim gravity_sim.cpp)
-add_gravity_executable(gravity_sim_3Dgrid gravity_sim_3Dgrid.cpp)
+add_gravity_executable(3d_test src/3D_test.cpp)
+add_gravity_executable(gravity_sim src/gravity_sim.cpp)
+add_gravity_executable(gravity_sim_3Dgrid src/gravity_sim_3Dgrid.cpp)
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
