@@ -1,5 +1,6 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+#include <array>
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -9,7 +10,7 @@
 #include <vector>
 
 const char *vertexShaderSource = R"glsl(
-#version 330 core
+#version 430 core
 layout(location = 0) in vec3 aPos; //layout + in: vị trí nhận dữ liệu kênh 0
 
 uniform mat4 model;
@@ -17,7 +18,10 @@ uniform mat4 view;
 uniform mat4 projection;
 
 #define MAX_OBJS 128
-uniform vec4 u_objData[MAX_OBJS];
+layout(std430, binding = 0) readonly buffer ObjectState
+{
+    vec4 data[MAX_OBJS];
+};
 uniform int u_numObjs;
 
 uniform bool u_isGrid; 
@@ -30,8 +34,8 @@ void main()
         float totalDisplacement = 0.0;
         for(int i = 0; i < u_numObjs; ++i) 
         {
-            vec3 objPos = u_objData[i].xyz;
-            float objRs = u_objData[i].w;
+            vec3 objPos = data[i].xyz;
+            float objRs = data[i].w;
             vec3 toObject = objPos - vertexPos;
             float distance_m = length(toObject) * 1000.0;
             
@@ -85,9 +89,12 @@ int gridDivisions = 200;
 GLFWwindow *StartGLU();
 GLuint CreateShaderProgram(const char *vertexSource,
                            const char *fragmentSource);
-void CreateVBOVAO(GLuint &VAO, GLuint &VBO, const float *vertices,
-                  size_t vertexCount);
-void UpdateCam(GLuint shaderProgram, glm::vec3 cameraPos);
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
+                       size_t vertexCount, GLuint *EBO = nullptr,
+                       const unsigned int *indices = nullptr,
+                       size_t indexCount = 0);
+void Cleanup(GLuint shaderProgram);
+void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos);
 void keyCallback(GLFWwindow *window, int key, int scancode, int action,
                  int mods);
 void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
@@ -134,7 +141,7 @@ class Object
         std::vector<float> vertices = Draw();
         vertexCount = vertices.size();
 
-        CreateVBOVAO(VAO, VBO, vertices.data(), vertexCount);
+        CreateMeshBuffers(VAO, VBO, vertices.data(), vertexCount);
     }
     // Generate sphere mesh (CPU)
     std::vector<float> Draw()
@@ -217,7 +224,10 @@ std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center,
                                          float centralMass);
 
 GLuint gridVAO, gridVBO, gridEBO;
+GLuint objectStateSSBO;
 size_t gridIndexCount = 0;
+constexpr int maxObjects = 128;
+std::array<glm::vec4, maxObjects> objectStateData{};
 
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center,
                                          float centralMass)
@@ -266,6 +276,7 @@ int main()
 
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     GLint objectColorLoc = glGetUniformLocation(shaderProgram, "objectColor");
+    GLint viewLoc = glGetUniformLocation(shaderProgram, "view");
     glUseProgram(shaderProgram);
 
     glfwSetCursorPosCallback(window, mouse_callback);
@@ -285,42 +296,30 @@ int main()
         Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219 * pow(10, 24),
                5515),
     };
-
+    // Add random objects to the simulation
     auto randomBodies = CreateRandomOrbiters(
         numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
-
+    // Create grid vertices and indices, and set up VBO, VAO, and EBO
     std::vector<float> gridVertices =
         CreateGridVertices(gridSize, gridDivisions);
-    CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
-
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     gridIndexCount = gridIndices.size();
 
-    glGenVertexArrays(1, &gridVAO);
-    glGenBuffers(1, &gridVBO);
-    glGenBuffers(1, &gridEBO);
+    CreateMeshBuffers(gridVAO, gridVBO, gridVertices.data(),
+                      gridVertices.size(), &gridEBO, gridIndices.data(),
+                      gridIndices.size());
 
-    glBindVertexArray(gridVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float),
-                 gridVertices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 gridIndices.size() * sizeof(unsigned int), gridIndices.data(),
-                 GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
-                          (void *)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+    glGenBuffers(1, &objectStateSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData),
+                 objectStateData.data(), GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectStateSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     // Lấy vị trí Uniforms
     GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
     GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
-    GLint objDataLoc = glGetUniformLocation(shaderProgram, "u_objData");
 
     std::cout << "Earth radius: " << objs[1].radius << std::endl;
     std::cout << "Moon radius: " << objs[0].radius << std::endl;
@@ -335,7 +334,7 @@ int main()
 
         glfwSetKeyCallback(window, keyCallback);
         glfwSetMouseButtonCallback(window, mouseButtonCallback);
-        UpdateCam(shaderProgram, cameraPos);
+        UpdateCam(shaderProgram, viewLoc, cameraPos);
         if (!objs.empty() && objs.back().Initalizing)
         {
             if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) ==
@@ -359,27 +358,21 @@ int main()
         // Draw the grid
         glUseProgram(shaderProgram);
         glUniform1i(isGridLoc, 1);
-        // 1. Thu thập dữ liệu vị trí và bán kính rs của các vật thể hiện tại
-        std::vector<glm::vec3> positions;
-        std::vector<glm::vec4> objectData;
+        int activeObjs = static_cast<int>(objs.size());
+        if (activeObjs > maxObjects)
+            activeObjs = maxObjects;
 
-        for (const auto &obj : objs)
+        for (int i = 0; i < activeObjs; ++i)
         {
-            positions.push_back(obj.GetPos());
-            objectData.emplace_back(obj.GetPos(), obj.rs);
+            objectStateData[i] = glm::vec4(objs[i].GetPos(), objs[i].rs);
         }
 
-        int activeObjs = static_cast<int>(positions.size());
-        if (activeObjs > 128)
-            activeObjs = 128; // Giới hạn theo MAX_OBJS trong Shader
-
-        // 2. Truyền dữ liệu sang GPU (Chỉ tốn vài kilobyte truyền dữ liệu
-        // Uniform)
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                        activeObjs * sizeof(objectStateData[0]),
+                        objectStateData.data());
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glUniform1i(numObjsLoc, activeObjs);
-        if (activeObjs > 0)
-        {
-            glUniform4fv(objDataLoc, activeObjs, glm::value_ptr(objectData[0]));
-        }
 
         // 3. Vẽ lưới - GPU sẽ tự động làm biến dạng lưới trong Vertex Shader
         glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
@@ -452,19 +445,7 @@ int main()
         glfwPollEvents();
     }
 
-    for (auto &obj : objs)
-    {
-        glDeleteVertexArrays(1, &obj.VAO);
-        glDeleteBuffers(1, &obj.VBO);
-    }
-
-    glDeleteVertexArrays(1, &gridVAO);
-    glDeleteBuffers(1, &gridVBO);
-
-    glDeleteProgram(shaderProgram);
-    glfwTerminate();
-
-    glfwTerminate();
+    Cleanup(shaderProgram);
     return 0;
 }
 
@@ -475,6 +456,9 @@ GLFWwindow *StartGLU()
         std::cout << "Failed to initialize GLFW, panic" << std::endl;
         return nullptr;
     }
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     GLFWwindow *window = glfwCreateWindow(
         1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
     if (!window)
@@ -552,8 +536,9 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
 
     return shaderProgram;
 }
-void CreateVBOVAO(GLuint &VAO, GLuint &VBO, const float *vertices,
-                  size_t vertexCount)
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
+                       size_t vertexCount, GLuint *EBO,
+                       const unsigned int *indices, size_t indexCount)
 {
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
@@ -566,14 +551,38 @@ void CreateVBOVAO(GLuint &VAO, GLuint &VBO, const float *vertices,
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
                           (void *)0);
     glEnableVertexAttribArray(0);
+
+    if (EBO != nullptr)
+    {
+        glGenBuffers(1, EBO);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int),
+                     indices, GL_STATIC_DRAW);
+    }
+
     glBindVertexArray(0);
 }
 
-void UpdateCam(GLuint shaderProgram, glm::vec3 cameraPos)
+void Cleanup(GLuint shaderProgram)
+{
+    for (auto &obj : objs)
+    {
+        glDeleteVertexArrays(1, &obj.VAO);
+        glDeleteBuffers(1, &obj.VBO);
+    }
+
+    glDeleteVertexArrays(1, &gridVAO);
+    glDeleteBuffers(1, &gridVBO);
+    glDeleteBuffers(1, &gridEBO);
+    glDeleteBuffers(1, &objectStateSSBO);
+    glDeleteProgram(shaderProgram);
+    glfwTerminate();
+}
+
+void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos)
 {
     glUseProgram(shaderProgram);
     glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-    GLint viewLoc = glGetUniformLocation(shaderProgram, "view");
     glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
 }
 
