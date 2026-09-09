@@ -11,7 +11,7 @@
 
 const char *vertexShaderSource = R"glsl(
 #version 430 core
-layout(location = 0) in vec3 aPos; //layout + in: vị trí nhận dữ liệu kênh 0
+layout(location = 0) in vec3 aPos;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -22,8 +22,8 @@ layout(std430, binding = 0) readonly buffer ObjectState
 {
     vec4 data[MAX_OBJS];
 };
-uniform int u_numObjs;
 
+uniform int u_numObjs;
 uniform bool u_isGrid; 
 
 void main() 
@@ -39,19 +39,13 @@ void main()
             vec3 toObject = objPos - vertexPos;
             float distance_m = length(toObject) * 1000.0;
             
-            // Hàm max() đảm bảo khoảng cách tính toán không nhỏ hơn bán kính Schwarzschild
-            // Ngăn chặn lỗi chia cho 0 tại điểm kỳ dị (singularity)
             distance_m = max(distance_m, objRs * 1.0001); 
             
             if (objRs > 0.0) 
             {
-                // Áp dụng mô hình Newtonian potential
-                // Hệ số 2.0e11 là scaling factor để trực quan hóa độ sâu của hố trọng lực
                 totalDisplacement -= (2.0e11 * objRs) / distance_m;
             }
         }
-        
-        // Cộng dồn biến dạng âm vào tọa độ Y gốc (-900.0f) thay vì gán đè toàn bộ
         vertexPos.y = aPos.y + totalDisplacement;
     }
     gl_Position = projection * view * model * vec4(vertexPos, 1.0);
@@ -61,9 +55,10 @@ void main()
 const char *fragmentShaderSource = R"glsl(
 #version 330 core
 out vec4 FragColor;
-uniform vec4 objectColor; // Add this uniform
-void main() {
-    FragColor = objectColor; // Use the uniform color
+uniform vec4 objectColor;
+void main() 
+{
+    FragColor = objectColor;
 }
 )glsl";
 
@@ -101,7 +96,7 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action,
                  int mods);
 void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
 void scroll_callback(GLFWwindow *window, double xoffset, double yoffset);
-
+void InitializeGlfwCallbacks(GLFWwindow *window);
 void mouse_callback(GLFWwindow *window, double xpos, double ypos);
 glm::vec3 sphericalToCartesian(float r, float theta, float phi);
 void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount);
@@ -220,6 +215,7 @@ class Object
         return 1.0f;
     }
 };
+
 std::vector<Object> objs = {};
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center,
@@ -281,9 +277,7 @@ int main()
     GLint viewLoc = glGetUniformLocation(shaderProgram, "view");
     glUseProgram(shaderProgram);
 
-    glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetScrollCallback(window, scroll_callback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    InitializeGlfwCallbacks(window);
 
     // projection matrix
     glm::mat4 projection = glm::perspective(glm::radians(45.0f),
@@ -302,6 +296,7 @@ int main()
     auto randomBodies = CreateRandomOrbiters(
         numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
+
     InitializeRenderingPipeline();
     InitializeSimulationPipeline();
 
@@ -320,8 +315,6 @@ int main()
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glfwSetKeyCallback(window, keyCallback);
-        glfwSetMouseButtonCallback(window, mouseButtonCallback);
         UpdateCam(shaderProgram, viewLoc, cameraPos);
         if (!objs.empty() && objs.back().Initalizing)
         {
@@ -436,6 +429,15 @@ int main()
 
     Cleanup(shaderProgram);
     return 0;
+}
+
+void InitializeGlfwCallbacks(GLFWwindow *window)
+{
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
 
 GLFWwindow *StartGLU()
