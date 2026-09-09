@@ -93,6 +93,8 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
                        size_t vertexCount, GLuint *EBO = nullptr,
                        const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
+void InitializeRenderingPipeline();
+void InitializeSimulationPipeline();
 void Cleanup(GLuint shaderProgram);
 void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos);
 void keyCallback(GLFWwindow *window, int key, int scancode, int action,
@@ -300,29 +302,15 @@ int main()
     auto randomBodies = CreateRandomOrbiters(
         numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
-    // Create grid vertices and indices, and set up VBO, VAO, and EBO
-    std::vector<float> gridVertices =
-        CreateGridVertices(gridSize, gridDivisions);
-    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
-    gridIndexCount = gridIndices.size();
-
-    CreateMeshBuffers(gridVAO, gridVBO, gridVertices.data(),
-                      gridVertices.size(), &gridEBO, gridIndices.data(),
-                      gridIndices.size());
-
-    glGenBuffers(1, &objectStateSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData),
-                 objectStateData.data(), GL_DYNAMIC_DRAW);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectStateSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    InitializeRenderingPipeline();
+    InitializeSimulationPipeline();
 
     // Lấy vị trí Uniforms
     GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
     GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
 
-    std::cout << "Earth radius: " << objs[1].radius << std::endl;
-    std::cout << "Moon radius: " << objs[0].radius << std::endl;
+    // std::cout << "Earth radius: " << objs[1].radius << std::endl;
+    // std::cout << "Moon radius: " << objs[0].radius << std::endl;
 
     while (!glfwWindowShouldClose(window) && running == true)
     {
@@ -342,6 +330,7 @@ int main()
             {
                 // Increase mass by 1% per second
                 objs.back().mass *= 1.0 + 1.0 * deltaTime;
+                objs.back().rs = (2 * G * objs.back().mass) / (c * c);
 
                 // Update radius based on new mass
                 objs.back().radius =
@@ -561,6 +550,28 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
     }
 
     glBindVertexArray(0);
+}
+
+void InitializeRenderingPipeline()
+{
+    std::vector<float> gridVertices =
+        CreateGridVertices(gridSize, gridDivisions);
+    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
+    gridIndexCount = gridIndices.size();
+
+    CreateMeshBuffers(gridVAO, gridVBO, gridVertices.data(),
+                      gridVertices.size(), &gridEBO, gridIndices.data(),
+                      gridIndices.size());
+}
+
+void InitializeSimulationPipeline()
+{
+    glGenBuffers(1, &objectStateSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData),
+                 objectStateData.data(), GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectStateSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 void Cleanup(GLuint shaderProgram)
