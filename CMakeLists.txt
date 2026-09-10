@@ -18,8 +18,8 @@ set(GRAVITY_SIM_LIBS
     OpenGL::GL
 )
 
-function(add_gravity_executable target source)
-    add_executable(${target} ${source})
+function(add_gravity_executable target)
+    add_executable(${target} ${ARGN})
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -51,6 +51,20 @@ endfunction()
 
 add_gravity_executable(3d_test src/3D_test.cpp)
 add_gravity_executable(gravity_sim src/gravity_sim.cpp)
-add_gravity_executable(gravity_sim_3Dgrid src/gravity_sim_3Dgrid.cpp)
+add_gravity_executable(gravity_sim_3Dgrid
+    src/gravity_sim_3Dgrid.cpp
+    src/gravity_sim_3Dgrid_function.cpp
+    shaders/vertex_shader.glsl
+    shaders/fragment_shader.glsl
+)
+
+add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vertex_shader.glsl
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fragment_shader.glsl
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
+)
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
