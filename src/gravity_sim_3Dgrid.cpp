@@ -18,9 +18,15 @@ uniform mat4 view;
 uniform mat4 projection;
 
 #define MAX_OBJS 128
-layout(std430, binding = 0) readonly buffer ObjectState
+struct ParticleState
 {
-    vec4 data[MAX_OBJS];
+    vec4 position_mass;
+    vec4 velocity_radius;
+};
+
+layout(std430, binding = 0) readonly buffer ParticleStateSSBO
+{
+    ParticleState particles[MAX_OBJS];
 };
 
 uniform int u_numObjs;
@@ -34,8 +40,8 @@ void main()
         float totalDisplacement = 0.0;
         for(int i = 0; i < u_numObjs; ++i) 
         {
-            vec3 objPos = data[i].xyz;
-            float objRs = data[i].w;
+            vec3 objPos = particles[i].position_mass.xyz;
+            float objRs = particles[i].velocity_radius.w;
             vec3 toObject = objPos - vertexPos;
             float distance_m = length(toObject) * 1000.0;
             
@@ -172,7 +178,9 @@ class Object
 
     void UpdatePos()
     {
-        this->position += this->velocity * deltaTime;
+        this->position[0] += this->velocity[0] / 94;
+        this->position[1] += this->velocity[1] / 94;
+        this->position[2] += this->velocity[2] / 94;
         this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
     void UpdateVertices()
@@ -185,7 +193,12 @@ class Object
         glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
     }
     glm::vec3 GetPos() const { return this->position; }
-    void accelerate(float x, float y, float z) { this->velocity += glm::vec3(x, y, z) * deltaTime; }
+    void accelerate(float x, float y, float z)
+    {
+        this->velocity[0] += x / 96;
+        this->velocity[1] += y / 96;
+        this->velocity[2] += z / 96;
+    }
     float CheckCollision(const Object &other)
     {
         float dx = other.position[0] - this->position[0];
@@ -200,13 +213,24 @@ class Object
     }
 };
 
+struct ParticleStateCPU
+{
+    glm::vec4 position_mass;
+    glm::vec4 velocity_radius;
+};
+
+static_assert(sizeof(ParticleStateCPU) == 2 * sizeof(glm::vec4),
+              "ParticleStateCPU must be a vec4 pair for std430 compatibility.");
+static_assert(alignof(ParticleStateCPU) == alignof(glm::vec4),
+              "ParticleStateCPU must respect vec4 alignment.");
+
 // Global OpenGL resources and simulation objects.
 std::vector<Object> objs = {};
 GLuint gridVAO, gridVBO, gridEBO;
-GLuint objectStateSSBO;
+GLuint particleStateSSBO;
 size_t gridIndexCount = 0;
 constexpr int maxObjects = 128;
-std::array<glm::vec4, maxObjects> objectStateData{};
+std::array<ParticleStateCPU, maxObjects> particleStateData{};
 
 int main()
 {
@@ -279,11 +303,12 @@ int main()
 
         for (int i = 0; i < activeObjs; ++i)
         {
-            objectStateData[i] = glm::vec4(objs[i].GetPos(), objs[i].rs);
+            particleStateData[i].position_mass = glm::vec4(objs[i].GetPos(), objs[i].mass);
+            particleStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
         }
 
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(objectStateData[0]), objectStateData.data());
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, particleStateSSBO);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(particleStateData[0]), particleStateData.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glUniform1i(numObjsLoc, activeObjs);
 
@@ -481,10 +506,10 @@ void InitializeRenderingPipeline()
 
 void InitializeSimulationPipeline()
 {
-    glGenBuffers(1, &objectStateSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData), objectStateData.data(), GL_DYNAMIC_DRAW);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectStateSSBO);
+    glGenBuffers(1, &particleStateSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, particleStateSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(particleStateData), particleStateData.data(), GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, particleStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
@@ -499,7 +524,7 @@ void Cleanup(GLuint shaderProgram)
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteBuffers(1, &gridVBO);
     glDeleteBuffers(1, &gridEBO);
-    glDeleteBuffers(1, &objectStateSSBO);
+    glDeleteBuffers(1, &particleStateSSBO);
     glDeleteProgram(shaderProgram);
     glfwTerminate();
 }
