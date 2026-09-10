@@ -1,8 +1,8 @@
 #include "gravity_sim_3Dgrid_function.h"
 
 // Physical constants and initial simulation configuration.
-const double G = 6.6743e-11;
-const float c = 299792458.0;
+const double kGravitationalConstant = 6.6743e-11;
+const float kSpeedOfLight = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
 int numRandomObjects = 100;
 float gridSize = 30000.0f;
@@ -26,7 +26,7 @@ std::vector<Object> objs = {};
 GLuint gridVAO, gridVBO, gridEBO;
 GLuint sphreStateSSBO;
 size_t gridIndexCount = 0;
-std::array<sphreStateCPU, maxObjects> sphreStateData{};
+std::array<SphreStateCpu, kMaxObjects> sphreStateData{};
 
 int main()
 {
@@ -59,12 +59,9 @@ int main()
     InitializeRenderingPipeline();
     InitializeSimulationPipeline();
 
-    // Lấy vị trí Uniforms
+    // Get uniform locations for grid rendering
     GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
     GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
-
-    // std::cout << "Earth radius: " << objs[1].radius << std::endl;
-    // std::cout << "Moon radius: " << objs[0].radius << std::endl;
 
     while (!glfwWindowShouldClose(window) && running == true)
     {
@@ -74,34 +71,34 @@ int main()
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        UpdateCam(shaderProgram, viewLoc, cameraPos);
-        if (!objs.empty() && objs.back().Initalizing)
+        UpdateCamera(shaderProgram, viewLoc, cameraPos);
+        if (!objs.empty() && objs.back().initializing)
         {
             if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
             {
                 // Increase mass by 1% per second
                 objs.back().mass *= 1.0 + 1.0 * deltaTime;
-                objs.back().rs = (2 * G * objs.back().mass) / (c * c);
+                objs.back().rs = (2 * kGravitationalConstant * objs.back().mass) / (kSpeedOfLight * kSpeedOfLight);
 
                 // Update radius based on new mass
                 objs.back().radius =
                     pow((3 * objs.back().mass / objs.back().density) / (4 * 3.14159265359f), 1.0f / 3.0f) / 100000.0f;
 
                 // Update vertex data
-                objs.back().UpdateVertices();
+                objs.back().UpdateVertexBuffer();
             }
         }
 
-        // Draw the grid
+        // Draw the grid and objects
         glUseProgram(shaderProgram);
         glUniform1i(isGridLoc, 1);
         int activeObjs = static_cast<int>(objs.size());
-        if (activeObjs > maxObjects)
-            activeObjs = maxObjects;
+        if (activeObjs > kMaxObjects)
+            activeObjs = kMaxObjects;
 
         for (int i = 0; i < activeObjs; ++i)
         {
-            sphreStateData[i].position_mass = glm::vec4(objs[i].GetPos(), objs[i].mass);
+            sphreStateData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
             sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
         }
 
@@ -109,69 +106,57 @@ int main()
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(sphreStateData[0]), sphreStateData.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glUniform1i(numObjsLoc, activeObjs);
-
-        // 3. Vẽ lưới - GPU sẽ tự động làm biến dạng lưới trong Vertex Shader
         glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
         DrawGrid(shaderProgram, gridVAO, gridIndexCount);
         glUniform1i(isGridLoc, 0);
-        // Draw the triangle
         float epsilon = 10.0f;
         for (auto &obj : objs)
         {
             glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
-
             for (auto &obj2 : objs)
             {
-                if (&obj2 != &obj && !obj.Initalizing && !obj2.Initalizing)
+                if (&obj2 != &obj && !obj.initializing && !obj2.initializing)
                 {
-                    float dx = obj2.GetPos()[0] - obj.GetPos()[0];
-                    float dy = obj2.GetPos()[1] - obj.GetPos()[1];
-                    float dz = obj2.GetPos()[2] - obj.GetPos()[2];
+                    float dx = obj2.GetPosition()[0] - obj.GetPosition()[0];
+                    float dy = obj2.GetPosition()[1] - obj.GetPosition()[1];
+                    float dz = obj2.GetPosition()[2] - obj.GetPosition()[2];
                     float distance = sqrt(dx * dx + dy * dy + dz * dz);
-
                     if (distance > 0)
                     {
                         std::vector<float> direction = {dx / distance, dy / distance, dz / distance};
                         distance *= 1000;
-                        // double Gforce = (G * obj.mass * obj2.mass) /
-                        // (distance * distance);
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance + epsilon * epsilon);
-
-                        float acc1 = Gforce / obj.mass;
-                        std::vector<float> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
+                        double gravitationalForce =
+                            (kGravitationalConstant * obj.mass * obj2.mass) / (distance * distance + epsilon * epsilon);
+                        float acceleration = gravitationalForce / obj.mass;
+                        std::vector<float> accelerationVector = {
+                            direction[0] * acceleration, direction[1] * acceleration, direction[2] * acceleration};
                         if (!pause)
                         {
-                            obj.accelerate(acc[0], acc[1], acc[2]);
+                            obj.Accelerate(accelerationVector[0], accelerationVector[1], accelerationVector[2]);
                         }
-
-                        // collision
                         obj.velocity *= obj.CheckCollision(obj2);
                     }
                 }
             }
-            if (obj.Initalizing)
+            if (obj.initializing)
             {
                 obj.radius = pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
-                obj.UpdateVertices();
+                obj.UpdateVertexBuffer();
             }
-
-            // update positions
             if (!pause)
             {
-                obj.UpdatePos();
+                obj.UpdatePosition();
             }
 
             glm::mat4 model = glm::mat4(1.0f);
-            model = glm::translate(model, obj.position); // Apply position here
+            model = glm::translate(model, obj.position);
             glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
             glBindVertexArray(obj.VAO);
             glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
         }
-
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
-
     Cleanup(shaderProgram);
     return 0;
 }

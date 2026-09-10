@@ -12,26 +12,26 @@
 #include <string>
 #include <vector>
 
-extern const double G;
-extern const float c;
+extern const double kGravitationalConstant;
+extern const float kSpeedOfLight;
 
 class Object;
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
 GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
-void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *EBO = nullptr,
+void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount, GLuint *ebo = nullptr,
                        const unsigned int *indices = nullptr, size_t indexCount = 0);
 void InitializeRenderingPipeline();
 void InitializeSimulationPipeline();
 void Cleanup(GLuint shaderProgram);
-void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos);
-void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
-void mouse_callback(GLFWwindow *window, double xpos, double ypos);
-void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
-void scroll_callback(GLFWwindow *window, double xoffset, double yoffset);
+void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
+void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods);
+void MouseCallback(GLFWwindow *window, double xPosition, double yPosition);
+void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
+void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset);
 void InitializeGlfwCallbacks(GLFWwindow *window);
-glm::vec3 sphericalToCartesian(float r, float theta, float phi);
+glm::vec3 SphericalToCartesian(float radius, float theta, float phi);
 void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount);
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);
@@ -46,8 +46,8 @@ class Object
     size_t vertexCount;
     glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
 
-    bool Initalizing = false;
-    bool Launched = false;
+    bool initializing = false;
+    bool launched = false;
     bool target = false;
 
     float mass;
@@ -55,7 +55,7 @@ class Object
     float radius;
     float rs;
 
-    glm::vec3 LastPos = position;
+    glm::vec3 lastPos = position;
 
     Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass, float density = 3344)
     {
@@ -64,7 +64,7 @@ class Object
         this->mass = mass;
         this->density = density;
         this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
-        this->rs = (2 * G * this->mass) / (c * c);
+        this->rs = (2 * kGravitationalConstant * this->mass) / (kSpeedOfLight * kSpeedOfLight);
         std::vector<float> vertices = DrawSphereMesh();
         vertexCount = vertices.size();
         CreateMeshBuffers(VAO, VBO, vertices.data(), vertexCount);
@@ -83,10 +83,10 @@ class Object
             {
                 float phi1 = j / sectors * 2 * glm::pi<float>();
                 float phi2 = (j + 1) / sectors * 2 * glm::pi<float>();
-                glm::vec3 v1 = sphericalToCartesian(radius, theta1, phi1);
-                glm::vec3 v2 = sphericalToCartesian(radius, theta1, phi2);
-                glm::vec3 v3 = sphericalToCartesian(radius, theta2, phi1);
-                glm::vec3 v4 = sphericalToCartesian(radius, theta2, phi2);
+                glm::vec3 v1 = SphericalToCartesian(radius, theta1, phi1);
+                glm::vec3 v2 = SphericalToCartesian(radius, theta1, phi2);
+                glm::vec3 v3 = SphericalToCartesian(radius, theta2, phi1);
+                glm::vec3 v4 = SphericalToCartesian(radius, theta2, phi2);
                 vertices.insert(vertices.end(), {v1.x, v1.y, v1.z});
                 vertices.insert(vertices.end(), {v2.x, v2.y, v2.z});
                 vertices.insert(vertices.end(), {v3.x, v3.y, v3.z});
@@ -98,7 +98,7 @@ class Object
         return vertices;
     }
 
-    void UpdatePos()
+    void UpdatePosition()
     {
         this->position[0] += this->velocity[0] / 94;
         this->position[1] += this->velocity[1] / 94;
@@ -106,16 +106,16 @@ class Object
         this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
 
-    void UpdateVertices()
+    void UpdateVertexBuffer()
     {
         std::vector<float> vertices = DrawSphereMesh();
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
         glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
     }
 
-    glm::vec3 GetPos() const { return this->position; }
+    glm::vec3 GetPosition() const { return this->position; }
 
-    void accelerate(float x, float y, float z)
+    void Accelerate(float x, float y, float z)
     {
         this->velocity[0] += x / 96;
         this->velocity[1] += y / 96;
@@ -136,17 +136,17 @@ class Object
     }
 };
 
-struct sphreStateCPU
+struct SphreStateCpu
 {
     glm::vec4 position_mass;
     glm::vec4 velocity_radius;
 };
 
-static_assert(sizeof(sphreStateCPU) == 2 * sizeof(glm::vec4),
-              "sphreStateCPU must be a vec4 pair for std430 compatibility.");
-static_assert(alignof(sphreStateCPU) == alignof(glm::vec4), "sphreStateCPU must respect vec4 alignment.");
+static_assert(sizeof(SphreStateCpu) == 2 * sizeof(glm::vec4),
+              "SphreStateCpu must be a vec4 pair for std430 compatibility.");
+static_assert(alignof(SphreStateCpu) == alignof(glm::vec4), "SphreStateCpu must respect vec4 alignment.");
 
-inline constexpr int maxObjects = 200;
+inline constexpr int kMaxObjects = 200;
 
 extern bool running;
 extern bool pause;
@@ -169,4 +169,4 @@ extern GLuint gridVBO;
 extern GLuint gridEBO;
 extern GLuint sphreStateSSBO;
 extern size_t gridIndexCount;
-extern std::array<sphreStateCPU, maxObjects> sphreStateData;
+extern std::array<SphreStateCpu, kMaxObjects> sphreStateData;

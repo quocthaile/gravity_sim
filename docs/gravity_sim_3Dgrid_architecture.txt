@@ -1,0 +1,445 @@
+GRAVITY SIMULATION PROJECT DOCUMENTATION
+=========================================
+
+1. PROJECT OVERVIEW
+-------------------
+
+This project is a C++23 OpenGL gravity simulation. It contains multiple
+executables, including the main 3D grid simulation:
+
+    gravity_sim_3Dgrid
+
+The 3D grid simulation combines:
+
+- CPU-side Newtonian body simulation.
+- GPU-side rendering of spherical bodies.
+- GPU-side deformation of a visual grid using an OpenGL 4.3 vertex shader.
+- GLFW for window creation and input handling.
+- GLEW for OpenGL function loading.
+- GLM for vectors and matrices.
+- CMake and vcpkg for configuration and dependency management.
+
+The simulation uses world-space distances in the scene and converts them to
+meters in selected physics calculations by multiplying by 1000.0.
+
+
+2. PROJECT STRUCTURE
+--------------------
+
+Root files:
+
+    CMakeLists.txt
+        Configures the C++23 project, dependencies, executable targets,
+        compiler warnings, and shader deployment.
+
+    CMakePresets.json
+        Stores reusable CMake configure/build presets.
+
+    vcpkg.json
+        Declares external dependencies managed by vcpkg.
+
+Source files:
+
+    src/3D_test.cpp
+        Separate 3D test executable.
+
+    src/gravity_sim.cpp
+        Earlier or alternative gravity simulation implementation.
+
+    src/gravity_sim_3Dgrid.cpp
+        Main entry point for the 3D grid simulation. It contains shader file
+        loading, global simulation state definitions, and the main render and
+        simulation loop.
+
+    src/gravity_sim_3Dgrid_function.h
+        Shared declarations, the Object class, the CPU SSBO data structure,
+        constants, and extern declarations for shared state.
+
+    src/gravity_sim_3Dgrid_function.cpp
+        Implementations for window setup, shader compilation, OpenGL buffer
+        creation, callbacks, camera updates, grid generation, cleanup, and
+        random orbiting body generation.
+
+Shader files:
+
+    shaders/vertex_shader.glsl
+        Deforms grid vertices on the GPU and applies model, view, and
+        projection transforms.
+
+    shaders/fragment_shader.glsl
+        Outputs the color supplied through the objectColor uniform.
+
+Build output:
+
+    build/gcc-debug/
+        GCC/MinGW debug build output.
+
+    build/msvc-release/
+        MSVC release build output.
+
+After building gravity_sim_3Dgrid, CMake copies the GLSL files into a
+shaders directory beside the executable. The application expects these paths
+relative to its working directory:
+
+    shaders/vertex_shader.glsl
+    shaders/fragment_shader.glsl
+
+
+3. MAIN RUNTIME COMPONENTS
+--------------------------
+
+3.1 Object
+
+Object represents one simulated spherical body. It stores:
+
+- Position and velocity.
+- Mass and density.
+- Physical radius.
+- Schwarzschild radius.
+- Render color.
+- OpenGL VAO/VBO handles for the sphere mesh.
+- Interaction state such as initializing and launched.
+
+The sphere mesh is generated on the CPU from spherical coordinates. The mesh
+is uploaded to an OpenGL vertex buffer and rendered with GL_TRIANGLES.
+
+3.2 CPU simulation loop
+
+Each frame, the main loop:
+
+1. Updates frame timing.
+2. Processes camera and input state.
+3. Updates the mass and radius of a body being initialized.
+4. Computes gravitational interaction between every pair of bodies.
+5. Applies acceleration and collision response.
+6. Updates body positions.
+7. Copies body data into the CPU SSBO staging array.
+8. Uploads the staging array to the GPU.
+9. Draws the deformed grid.
+10. Draws each spherical body.
+11. Swaps buffers and polls GLFW events.
+
+The pairwise body calculation is O(N^2), where N is the number of simulated
+objects.
+
+3.3 GPU rendering
+
+The vertex shader receives the grid vertices and the body state SSBO. When the
+u_isGrid uniform is true, the shader calculates a vertical displacement for
+each grid vertex. When it is false, regular object geometry is rendered
+without grid deformation.
+
+
+4. PHYSICS FORMULAS
+-------------------
+
+4.1 Gravitational constant and speed of light
+
+The simulation defines:
+
+    kGravitationalConstant = 6.6743e-11
+    kSpeedOfLight          = 299792458.0
+
+The gravitational constant is used in SI-style gravitational calculations.
+The speed of light is used to calculate the Schwarzschild radius.
+
+4.2 Physical body radius
+
+For a body with mass m and density rho, the code calculates the physical
+radius as:
+
+    radius = ((3 * m / rho) / (4 * pi))^(1 / 3) / 100000
+
+The division by 100000 scales the physical radius into the simulation's
+world-space coordinate system.
+
+4.3 Schwarzschild radius
+
+For a body of mass m:
+
+    rs = (2 * G * m) / c^2
+
+where:
+
+    G  = kGravitationalConstant
+    c  = kSpeedOfLight
+
+The value rs is transferred to the GPU as the fourth component of
+velocity_radius. The shader uses it as the strength/scale of grid deformation.
+
+4.4 Gravitational force
+
+For two bodies with masses m1 and m2 and separation d in meters:
+
+    F = (G * m1 * m2) / (d^2 + epsilon^2)
+
+The implementation uses epsilon = 10.0 to reduce the singularity risk when
+two bodies become very close.
+
+The acceleration applied to the current body is:
+
+    a = F / m1
+
+The direction vector is:
+
+    direction = (position2 - position1) / distance
+
+The acceleration vector is:
+
+    accelerationVector = direction * a
+
+The code applies the acceleration with a simulation time scale:
+
+    velocity += accelerationVector / 96
+
+The position update uses another fixed time scale:
+
+    position += velocity / 94
+
+These divisors are simulation tuning factors, not a general-purpose physical
+integrator timestep.
+
+4.5 Collision response
+
+If the distance between two bodies is smaller than the sum of their radii,
+the current body's velocity is multiplied by -0.2:
+
+    velocity *= -0.2
+
+Otherwise, the collision multiplier is 1.0.
+
+This is a simple bounce/reversal response and does not conserve momentum.
+
+
+5. GRID GENERATION AND DEFORMATION
+-----------------------------------
+
+5.1 Grid generation on the CPU
+
+CreateGridVertices creates a square grid with:
+
+    divisions + 1
+
+nodes along each side. The grid spans from -size / 2 to +size / 2 on the X
+and Z axes. All initial vertices use:
+
+    baseY = -900.0
+
+The vertex positions are uploaded to a VAO/VBO and the line connectivity is
+uploaded to an element buffer.
+
+CreateGridIndices creates horizontal and vertical line segments. The grid is
+rendered with:
+
+    glDrawElements(GL_LINES, ...)
+
+5.2 Grid deformation on the GPU
+
+For each grid vertex and each active body, the vertex shader performs:
+
+    toObject = objectPosition - vertexPosition
+    distance_m = length(toObject) * 1000.0
+
+The distance is clamped to avoid evaluating directly at a singularity:
+
+    distance_m = max(distance_m, rs * 1.0001)
+
+For bodies with a positive Schwarzschild radius, the shader adds:
+
+    totalDisplacement -= (2.0e11 * rs) / distance_m
+
+After all active bodies have contributed:
+
+    vertexPos.y = originalVertexY + totalDisplacement
+
+Therefore, the grid is displaced only along the Y axis. X and Z coordinates
+remain unchanged during deformation.
+
+The final transformed vertex position is:
+
+    gl_Position = projection * view * model * vec4(vertexPos, 1.0)
+
+5.3 Grid deformation pseudocode
+
+    totalDisplacement = 0
+
+    for each active body:
+        objectPosition = body.position_mass.xyz
+        schwarzschildRadius = body.velocity_radius.w
+        distance = length(objectPosition - vertexPosition) * 1000
+        distance = max(distance, schwarzschildRadius * 1.0001)
+
+        if schwarzschildRadius > 0:
+            totalDisplacement -=
+                (2.0e11 * schwarzschildRadius) / distance
+
+    vertexPosition.y = originalVertexPosition.y + totalDisplacement
+
+
+6. CPU/GPU DATA FLOW
+--------------------
+
+The CPU owns the simulation state. The GPU owns the grid deformation and
+rendering calculations.
+
+CPU objects and state:
+
+    Object.position
+    Object.velocity
+    Object.mass
+    Object.rs
+
+The CPU packs the data into a std430-compatible structure:
+
+    SphreStateCpu
+        vec4 position_mass
+            xyz = position
+            w   = mass
+
+        vec4 velocity_radius
+            xyz = velocity
+            w   = Schwarzschild radius
+
+The complete data path is:
+
+    +----------------------+
+    | Object instances     |
+    | CPU simulation state  |
+    +----------+-----------+
+               |
+               | Pack position, mass, velocity, rs
+               v
+    +----------------------+
+    | sphreStateData       |
+    | CPU staging array    |
+    +----------+-----------+
+               |
+               | glBufferSubData
+               v
+    +----------------------+
+    | OpenGL SSBO          |
+    | binding = 0         |
+    +----------+-----------+
+               |
+               | Vertex shader reads sphres[i]
+               v
+    +----------------------+
+    | Vertex shader        |
+    | grid displacement    |
+    +----------+-----------+
+               |
+               | gl_Position
+               v
+    +----------------------+
+    | Rasterization        |
+    | Fragment shader      |
+    +----------+-----------+
+               v
+    +----------------------+
+    | Window framebuffer    |
+    +----------------------+
+
+The active object count is sent separately through the u_numObjs uniform. The
+u_isGrid uniform selects whether the vertex shader performs grid deformation.
+
+The SSBO is initialized with glBindBufferBase using binding point 0. Each frame,
+only the active object prefix is uploaded with glBufferSubData.
+
+
+7. SHADER LOADING AND BUILD DEPLOYMENT
+--------------------------------------
+
+The C++ program reads shader source at runtime using LoadShaderSource(). It
+then passes the resulting strings to CreateShaderProgram().
+
+CreateShaderProgram performs these steps:
+
+1. Create a vertex shader object.
+2. Upload and compile the vertex shader source.
+3. Create and compile the fragment shader.
+4. Create and link the shader program.
+5. Delete the temporary shader objects.
+
+CMake includes the shader files in the gravity_sim_3Dgrid target and uses a
+POST_BUILD command to copy them into the executable's shaders directory.
+This keeps shader code separate from C++ and allows shader edits without
+embedding large raw string literals in the source file.
+
+
+8. NAMING CONVENTION
+--------------------
+
+The project naming convention is:
+
+    Classes / Structs       PascalCase
+    Functions               PascalCase
+    Variables               camelCase
+    Parameters              camelCase
+    Private member variables m_camelCase
+    Constants               kPascalCase
+    Namespaces               snake_case or lowercase
+    Macros                  UPPER_SNAKE_CASE
+
+Examples:
+
+    class Object;
+    struct SphreStateCpu;
+
+    void UpdateCamera(...);
+    void CreateMeshBuffers(...);
+    glm::vec3 SphericalToCartesian(...);
+
+    float gridSize;
+    int gridDivisions;
+    glm::vec3 cameraPosition;
+
+    const double kGravitationalConstant;
+    const float kSpeedOfLight;
+    inline constexpr int kMaxObjects;
+
+    #define MAX_OBJS 200
+
+Private member example:
+
+    int m_objectCount;
+
+Public data members should use camelCase. The m_ prefix is reserved for
+private member variables.
+
+Naming should be applied consistently across declarations, definitions,
+function calls, shader interfaces, and CMake-related identifiers where
+applicable.
+
+
+9. BUILD AND RUN NOTES
+----------------------
+
+Configure and build the debug target with:
+
+    cmake --build build/gcc-debug --target gravity_sim_3Dgrid
+
+The executable must be launched with a working directory that contains the
+runtime shader paths, or from the build output directory after the CMake
+POST_BUILD copy has completed:
+
+    shaders/vertex_shader.glsl
+    shaders/fragment_shader.glsl
+
+Required runtime dependencies are provided by the configured GLFW, GLEW,
+GLM, and OpenGL packages.
+
+
+10. CURRENT LIMITATIONS
+-----------------------
+
+- Body-to-body gravity is calculated in O(N^2) time on the CPU.
+- The simulation uses fixed divisors for velocity and position updates rather
+  than a formally integrated variable timestep.
+- Collision response is intentionally simple and does not conserve energy or
+  momentum.
+- Grid deformation uses a tuned visual scale factor of 2.0e11.
+- The shader supports a maximum of 200 objects through MAX_OBJS and
+  kMaxObjects.
+- Shader file paths are relative to the process working directory.
+- Error handling reports shader compilation/link failures but does not yet
+  abort immediately after a shader failure.

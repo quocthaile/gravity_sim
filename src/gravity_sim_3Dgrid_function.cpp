@@ -16,10 +16,10 @@ std::string LoadShaderSource(const std::string &filePath)
 
 void InitializeGlfwCallbacks(GLFWwindow *window)
 {
-    glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetScrollCallback(window, scroll_callback);
-    glfwSetKeyCallback(window, keyCallback);
-    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetCursorPosCallback(window, MouseCallback);
+    glfwSetScrollCallback(window, ScrollCallback);
+    glfwSetKeyCallback(window, KeyCallback);
+    glfwSetMouseButtonCallback(window, MouseButtonCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
 
@@ -104,7 +104,7 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
     return shaderProgram;
 }
 
-void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *EBO,
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *ebo,
                        const unsigned int *indices, size_t indexCount)
 {
     glGenVertexArrays(1, &VAO);
@@ -117,10 +117,10 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t v
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
 
-    if (EBO != nullptr)
+    if (ebo != nullptr)
     {
-        glGenBuffers(1, EBO);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
+        glGenBuffers(1, ebo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *ebo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices, GL_STATIC_DRAW);
     }
 
@@ -162,15 +162,16 @@ void Cleanup(GLuint shaderProgram)
     glfwTerminate();
 }
 
-void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos)
+void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition)
 {
     glUseProgram(shaderProgram);
-    glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-    glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
+    glm::mat4 view = glm::lookAt(cameraPosition, cameraPosition + cameraFront, cameraUp);
+    glUniformMatrix4fv(viewLocation, 1, GL_FALSE, glm::value_ptr(view));
 }
 
-void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
+void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods)
 {
+    (void)scanCode;
     float cameraSpeed = 1000.0f * deltaTime;
     bool shiftPressed = (mods & GLFW_MOD_SHIFT) != 0;
 
@@ -199,7 +200,7 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods
         running = false;
     }
 
-    if (!objs.empty() && objs.back().Initalizing)
+    if (!objs.empty() && objs.back().initializing)
     {
         Object &lastObj = objs.back();
         if (key == GLFW_KEY_UP && (action == GLFW_PRESS || action == GLFW_REPEAT))
@@ -223,20 +224,20 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods
     }
 }
 
-void mouse_callback(GLFWwindow *window, double xpos, double ypos)
+void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
 {
     (void)window;
-    float xoffset = xpos - lastX;
-    float yoffset = lastY - ypos;
-    lastX = xpos;
-    lastY = ypos;
+    float xOffset = xPosition - lastX;
+    float yOffset = lastY - yPosition;
+    lastX = xPosition;
+    lastY = yPosition;
 
     float sensitivity = 0.1f;
-    xoffset *= sensitivity;
-    yoffset *= sensitivity;
+    xOffset *= sensitivity;
+    yOffset *= sensitivity;
 
-    yaw += xoffset;
-    pitch += yoffset;
+    yaw += xOffset;
+    pitch += yOffset;
 
     if (pitch > 89.0f)
         pitch = 89.0f;
@@ -250,7 +251,7 @@ void mouse_callback(GLFWwindow *window, double xpos, double ypos)
     cameraFront = glm::normalize(front);
 }
 
-void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
+void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
 {
     (void)window;
     (void)mods;
@@ -259,43 +260,43 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
         if (action == GLFW_PRESS)
         {
             objs.emplace_back(glm::vec3(0.0, 0.0, 0.0), glm::vec3(0.0f, 0.0f, 0.0f), initMass);
-            objs.back().Initalizing = true;
+            objs.back().initializing = true;
         }
         if (action == GLFW_RELEASE && !objs.empty())
         {
-            objs.back().Initalizing = false;
-            objs.back().Launched = true;
+            objs.back().initializing = false;
+            objs.back().launched = true;
         }
     }
 }
 
-void scroll_callback(GLFWwindow *window, double xoffset, double yoffset)
+void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset)
 {
     (void)window;
-    (void)xoffset;
+    (void)xOffset;
     float cameraSpeed = 50000.0f * deltaTime;
-    if (yoffset > 0)
+    if (yOffset > 0)
         cameraPos += cameraSpeed * cameraFront;
-    else if (yoffset < 0)
+    else if (yOffset < 0)
         cameraPos -= cameraSpeed * cameraFront;
 }
 
-glm::vec3 sphericalToCartesian(float r, float theta, float phi)
+glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
 {
-    float x = r * sin(theta) * cos(phi);
-    float y = r * cos(theta);
-    float z = r * sin(theta) * sin(phi);
+    float x = radius * sin(theta) * cos(phi);
+    float y = radius * cos(theta);
+    float z = radius * sin(theta) * sin(phi);
     return glm::vec3(x, y, z);
 }
 
-void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount)
+void DrawGrid(GLuint shaderProgram, GLuint gridVao, size_t indexCount)
 {
     glUseProgram(shaderProgram);
     glm::mat4 model = glm::mat4(1.0f);
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
 
-    glBindVertexArray(gridVAO);
+    glBindVertexArray(gridVao);
     glPointSize(5.0f);
     glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
