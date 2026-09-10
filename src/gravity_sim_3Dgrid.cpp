@@ -62,45 +62,48 @@ void main()
 }
 )glsl";
 
+const double G = 6.6743e-11;
+const float c = 299792458.0;
+
+// Global simulation and camera state.
 bool running = true;
 bool pause = false;
 glm::vec3 cameraPos = glm::vec3(0.0f, 0.0f, 1.0f);
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
 glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
-float lastX = 400.0, lastY = 300.0;
-float yaw = -90;
-float pitch = 0.0;
-float deltaTime = 0.0;
-float lastFrame = 0.0;
+float lastX = 400.0f;
+float lastY = 300.0f;
+float yaw = -90.0f;
+float pitch = 0.0f;
+float deltaTime = 0.0f;
+float lastFrame = 0.0f;
 
-const double G = 6.6743e-11;
-const float c = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
-
 int numRandomObjects = 100;
 float gridSize = 30000.0f;
 int gridDivisions = 200;
 
+class Object;
+
+// Function prototypes, kept together in implementation order.
 GLFWwindow *StartGLU();
-GLuint CreateShaderProgram(const char *vertexSource,
-                           const char *fragmentSource);
-void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
-                       size_t vertexCount, GLuint *EBO = nullptr,
-                       const unsigned int *indices = nullptr,
-                       size_t indexCount = 0);
+GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *EBO = nullptr,
+                       const unsigned int *indices = nullptr, size_t indexCount = 0);
 void InitializeRenderingPipeline();
 void InitializeSimulationPipeline();
 void Cleanup(GLuint shaderProgram);
 void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos);
-void keyCallback(GLFWwindow *window, int key, int scancode, int action,
-                 int mods);
+void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
+void mouse_callback(GLFWwindow *window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
 void scroll_callback(GLFWwindow *window, double xoffset, double yoffset);
 void InitializeGlfwCallbacks(GLFWwindow *window);
-void mouse_callback(GLFWwindow *window, double xpos, double ypos);
 glm::vec3 sphericalToCartesian(float r, float theta, float phi);
 void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t vertexCount);
+std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
 
 class Object
 {
@@ -121,33 +124,27 @@ class Object
     float rs;
 
     glm::vec3 LastPos = position;
-
-    Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass,
-           float density = 3344)
+    // Constructor object with initial position, velocity, mass, and density. Calculates radius and Schwarzschild
+    // radius.
+    Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass, float density = 3344)
     {
         this->position = initPosition;
         this->velocity = initVelocity;
         this->mass = mass;
         this->density = density;
-        this->radius =
-            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)),
-                (1.0f / 3.0f)) /
-            100000;
+        this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
         this->rs = (2 * G * this->mass) / (c * c);
         // Generate vertices (centered at origin)
-        std::vector<float> vertices = Draw();
+        std::vector<float> vertices = DrawSphereMesh();
         vertexCount = vertices.size();
-
         CreateMeshBuffers(VAO, VBO, vertices.data(), vertexCount);
     }
     // Generate sphere mesh (CPU)
-    std::vector<float> Draw()
+    std::vector<float> DrawSphereMesh()
     {
         std::vector<float> vertices;
         int stacks = 10;
         int sectors = 10;
-
-        // Generate circumference points using integer steps
         for (float i = 0.0f; i <= stacks; ++i)
         {
             float theta1 = (i / stacks) * glm::pi<float>();
@@ -160,12 +157,10 @@ class Object
                 glm::vec3 v2 = sphericalToCartesian(radius, theta1, phi2);
                 glm::vec3 v3 = sphericalToCartesian(radius, theta2, phi1);
                 glm::vec3 v4 = sphericalToCartesian(radius, theta2, phi2);
-
                 // Triangle 1: v1-v2-v3
-                vertices.insert(vertices.end(), {v1.x, v1.y, v1.z}); //      /|
-                vertices.insert(vertices.end(), {v2.x, v2.y, v2.z}); //     / |
-                vertices.insert(vertices.end(), {v3.x, v3.y, v3.z}); //    /__|
-
+                vertices.insert(vertices.end(), {v1.x, v1.y, v1.z});
+                vertices.insert(vertices.end(), {v2.x, v2.y, v2.z});
+                vertices.insert(vertices.end(), {v3.x, v3.y, v3.z});
                 // Triangle 2: v2-v4-v3
                 vertices.insert(vertices.end(), {v2.x, v2.y, v2.z});
                 vertices.insert(vertices.end(), {v4.x, v4.y, v4.z});
@@ -177,31 +172,20 @@ class Object
 
     void UpdatePos()
     {
-        this->position[0] += this->velocity[0] / 94;
-        this->position[1] += this->velocity[1] / 94;
-        this->position[2] += this->velocity[2] / 94;
-        this->radius =
-            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)),
-                (1.0f / 3.0f)) /
-            100000;
+        this->position += this->velocity * deltaTime;
+        this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
     void UpdateVertices()
     {
         // Generate new vertices with current radius
-        std::vector<float> vertices = Draw();
+        std::vector<float> vertices = DrawSphereMesh();
 
         // Update the VBO with new vertex data
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float),
-                     vertices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
     }
     glm::vec3 GetPos() const { return this->position; }
-    void accelerate(float x, float y, float z)
-    {
-        this->velocity[0] += x / 96;
-        this->velocity[1] += y / 96;
-        this->velocity[2] += z / 96;
-    }
+    void accelerate(float x, float y, float z) { this->velocity += glm::vec3(x, y, z) * deltaTime; }
     float CheckCollision(const Object &other)
     {
         float dx = other.position[0] - this->position[0];
@@ -216,61 +200,18 @@ class Object
     }
 };
 
+// Global OpenGL resources and simulation objects.
 std::vector<Object> objs = {};
-std::vector<float> CreateGridVertices(float size, int divisions);
-std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center,
-                                         float centralMass);
-
 GLuint gridVAO, gridVBO, gridEBO;
 GLuint objectStateSSBO;
 size_t gridIndexCount = 0;
 constexpr int maxObjects = 128;
 std::array<glm::vec4, maxObjects> objectStateData{};
 
-std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center,
-                                         float centralMass)
-{
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
-    std::uniform_real_distribution<float> angleDist(0.0f,
-                                                    2.0f * glm::pi<float>());
-    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
-    std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
-    std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
-
-    std::vector<Object> generated;
-    generated.reserve(count);
-
-    for (int i = 0; i < count; ++i)
-    {
-        float radius = radiusDist(rng);
-        float angle = angleDist(rng);
-        float tilt = tiltDist(rng);
-        float orbitalSpeed = speedDist(rng);
-
-        glm::vec3 position(center.x + radius * std::cos(angle),
-                           center.y + radius * tilt,
-                           center.z + radius * std::sin(angle));
-
-        glm::vec3 velocity(-std::sin(angle) * orbitalSpeed, 0.0f,
-                           std::cos(angle) * orbitalSpeed);
-
-        float mass = massDist(rng);
-        generated.emplace_back(position, velocity, mass, 3344.0f);
-        generated.back().color = glm::vec4(
-            0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
-            0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
-            0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
-    }
-
-    return generated;
-}
-
 int main()
 {
     GLFWwindow *window = StartGLU();
-    GLuint shaderProgram =
-        CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
+    GLuint shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
 
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     GLint objectColorLoc = glGetUniformLocation(shaderProgram, "objectColor");
@@ -280,21 +221,17 @@ int main()
     InitializeGlfwCallbacks(window);
 
     // projection matrix
-    glm::mat4 projection = glm::perspective(glm::radians(45.0f),
-                                            1920.0f / 1080.0f, 0.1f, 750000.0f);
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
     GLint projectionLoc = glGetUniformLocation(shaderProgram, "projection");
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPos = glm::vec3(0.0f, 1000.0f, 5000.0f);
 
     objs = {
-        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228),
-               7.34767309 * pow(10, 22), 3344),
-        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219 * pow(10, 24),
-               5515),
+        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309 * pow(10, 22), 3344),
+        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219 * pow(10, 24), 5515),
     };
     // Add random objects to the simulation
-    auto randomBodies = CreateRandomOrbiters(
-        numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    auto randomBodies = CreateRandomOrbiters(numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
 
     InitializeRenderingPipeline();
@@ -318,8 +255,7 @@ int main()
         UpdateCam(shaderProgram, viewLoc, cameraPos);
         if (!objs.empty() && objs.back().Initalizing)
         {
-            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) ==
-                GLFW_PRESS)
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
             {
                 // Increase mass by 1% per second
                 objs.back().mass *= 1.0 + 1.0 * deltaTime;
@@ -327,10 +263,7 @@ int main()
 
                 // Update radius based on new mass
                 objs.back().radius =
-                    pow((3 * objs.back().mass / objs.back().density) /
-                            (4 * 3.14159265359f),
-                        1.0f / 3.0f) /
-                    100000.0f;
+                    pow((3 * objs.back().mass / objs.back().density) / (4 * 3.14159265359f), 1.0f / 3.0f) / 100000.0f;
 
                 // Update vertex data
                 objs.back().UpdateVertices();
@@ -350,9 +283,7 @@ int main()
         }
 
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                        activeObjs * sizeof(objectStateData[0]),
-                        objectStateData.data());
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(objectStateData[0]), objectStateData.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glUniform1i(numObjsLoc, activeObjs);
 
@@ -364,8 +295,7 @@ int main()
         float epsilon = 10.0f;
         for (auto &obj : objs)
         {
-            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b,
-                        obj.color.a);
+            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 
             for (auto &obj2 : objs)
             {
@@ -378,19 +308,14 @@ int main()
 
                     if (distance > 0)
                     {
-                        std::vector<float> direction = {
-                            dx / distance, dy / distance, dz / distance};
+                        std::vector<float> direction = {dx / distance, dy / distance, dz / distance};
                         distance *= 1000;
                         // double Gforce = (G * obj.mass * obj2.mass) /
                         // (distance * distance);
-                        double Gforce =
-                            (G * obj.mass * obj2.mass) /
-                            (distance * distance + epsilon * epsilon);
+                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance + epsilon * epsilon);
 
                         float acc1 = Gforce / obj.mass;
-                        std::vector<float> acc = {direction[0] * acc1,
-                                                  direction[1] * acc1,
-                                                  direction[2] * acc1};
+                        std::vector<float> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
                         if (!pause)
                         {
                             obj.accelerate(acc[0], acc[1], acc[2]);
@@ -403,10 +328,7 @@ int main()
             }
             if (obj.Initalizing)
             {
-                obj.radius =
-                    pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)),
-                        (1.0f / 3.0f)) /
-                    100000;
+                obj.radius = pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
                 obj.UpdateVertices();
             }
 
@@ -450,8 +372,7 @@ GLFWwindow *StartGLU()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow *window = glfwCreateWindow(
-        1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
+    GLFWwindow *window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
     if (!window)
     {
         std::cerr << "Failed to create GLFW window." << std::endl;
@@ -490,8 +411,7 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
     {
         char infoLog[512];
         glGetShaderInfoLog(vertexShader, 512, nullptr, infoLog);
-        std::cerr << "Vertex shader compilation failed: " << infoLog
-                  << std::endl;
+        std::cerr << "Vertex shader compilation failed: " << infoLog << std::endl;
     }
 
     // Fragment shader
@@ -504,8 +424,7 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
     {
         char infoLog[512];
         glGetShaderInfoLog(fragmentShader, 512, nullptr, infoLog);
-        std::cerr << "Fragment shader compilation failed: " << infoLog
-                  << std::endl;
+        std::cerr << "Fragment shader compilation failed: " << infoLog << std::endl;
     }
 
     // Shader program
@@ -527,8 +446,7 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
 
     return shaderProgram;
 }
-void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
-                       size_t vertexCount, GLuint *EBO,
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *EBO,
                        const unsigned int *indices, size_t indexCount)
 {
     glGenVertexArrays(1, &VAO);
@@ -536,19 +454,16 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
 
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices,
-                 GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices, GL_STATIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
-                          (void *)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
 
     if (EBO != nullptr)
     {
         glGenBuffers(1, EBO);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int),
-                     indices, GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices, GL_STATIC_DRAW);
     }
 
     glBindVertexArray(0);
@@ -556,13 +471,11 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
 
 void InitializeRenderingPipeline()
 {
-    std::vector<float> gridVertices =
-        CreateGridVertices(gridSize, gridDivisions);
+    std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     gridIndexCount = gridIndices.size();
 
-    CreateMeshBuffers(gridVAO, gridVBO, gridVertices.data(),
-                      gridVertices.size(), &gridEBO, gridIndices.data(),
+    CreateMeshBuffers(gridVAO, gridVBO, gridVertices.data(), gridVertices.size(), &gridEBO, gridIndices.data(),
                       gridIndices.size());
 }
 
@@ -570,8 +483,7 @@ void InitializeSimulationPipeline()
 {
     glGenBuffers(1, &objectStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData),
-                 objectStateData.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(objectStateData), objectStateData.data(), GL_DYNAMIC_DRAW);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
@@ -599,8 +511,7 @@ void UpdateCam(GLuint shaderProgram, GLint viewLoc, glm::vec3 cameraPos)
     glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
 }
 
-void keyCallback(GLFWwindow *window, int key, int scancode, int action,
-                 int mods)
+void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
     float cameraSpeed = 1000.0f * deltaTime;
     bool shiftPressed = (mods & GLFW_MOD_SHIFT) != 0;
@@ -617,13 +528,11 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action,
 
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
     {
-        cameraPos -=
-            cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
+        cameraPos -= cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
     }
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
     {
-        cameraPos +=
-            cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
+        cameraPos += cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
     }
 
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
@@ -654,40 +563,34 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action,
     // init arrows pos up down left right
     if (!objs.empty() && objs[objs.size() - 1].Initalizing)
     {
-        if (key == GLFW_KEY_UP &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_UP && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             if (!shiftPressed)
             {
                 objs[objs.size() - 1].position[1] += 0.5;
             }
         };
-        if (key == GLFW_KEY_DOWN &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_DOWN && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             if (!shiftPressed)
             {
                 objs[objs.size() - 1].position[1] -= 0.5;
             }
         }
-        if (key == GLFW_KEY_RIGHT &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_RIGHT && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             objs[objs.size() - 1].position[0] += 0.5;
         };
-        if (key == GLFW_KEY_LEFT &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_LEFT && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             objs[objs.size() - 1].position[0] -= 0.5;
         };
-        if (key == GLFW_KEY_UP &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_UP && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             objs[objs.size() - 1].position[2] += 0.5;
         };
 
-        if (key == GLFW_KEY_DOWN &&
-            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        if (key == GLFW_KEY_DOWN && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
             objs[objs.size() - 1].position[2] -= 0.5;
         }
@@ -725,8 +628,7 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
     {
         if (action == GLFW_PRESS)
         {
-            objs.emplace_back(glm::vec3(0.0, 0.0, 0.0),
-                              glm::vec3(0.0f, 0.0f, 0.0f), initMass);
+            objs.emplace_back(glm::vec3(0.0, 0.0, 0.0), glm::vec3(0.0f, 0.0f, 0.0f), initMass);
             objs[objs.size() - 1].Initalizing = true;
         };
         if (action == GLFW_RELEASE)
@@ -849,3 +751,37 @@ std::vector<unsigned int> CreateGridIndices(int divisions)
 
 // x = 0, z = 0 => current = 0*4 + 0 = 0 ----- 0/1
 // x = 0, z = 1 => current = 0*4 + 1 = 1 ----- 1/2
+
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass)
+{
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
+    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
+    std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
+    std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
+
+    std::vector<Object> generated;
+    generated.reserve(count);
+
+    for (int i = 0; i < count; ++i)
+    {
+        float radius = radiusDist(rng);
+        float angle = angleDist(rng);
+        float tilt = tiltDist(rng);
+        float orbitalSpeed = speedDist(rng);
+
+        glm::vec3 position(center.x + radius * std::cos(angle), center.y + radius * tilt,
+                           center.z + radius * std::sin(angle));
+
+        glm::vec3 velocity(-std::sin(angle) * orbitalSpeed, 0.0f, std::cos(angle) * orbitalSpeed);
+
+        float mass = massDist(rng);
+        generated.emplace_back(position, velocity, mass, 3344.0f);
+        generated.back().color = glm::vec4(0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
+                                           0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
+                                           0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
+    }
+
+    return generated;
+}
