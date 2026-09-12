@@ -56,6 +56,7 @@ add_gravity_executable(gravity_sim_3Dgrid
     src/gravity_sim_3Dgrid_function.cpp
     shaders/vertex_shader.glsl
     shaders/fragment_shader.glsl
+    shaders/grid_compute.glsl
 )
 
 add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
@@ -64,6 +65,7 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vertex_shader.glsl
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fragment_shader.glsl
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid_compute.glsl
         $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
 )
 

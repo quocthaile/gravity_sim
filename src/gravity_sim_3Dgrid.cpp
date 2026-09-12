@@ -25,6 +25,9 @@ float lastFrame = 0.0f;
 std::vector<Object> objs = {};
 GLuint gridVAO, gridVBO, gridEBO;
 GLuint sphreStateSSBO;
+GLuint gridComputeProgram;
+GLuint baseGridSSBO;
+size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
 std::array<SphreStateCpu, kMaxObjects> sphreStateData{};
 
@@ -34,6 +37,8 @@ int main()
     std::string vertexShaderSource = LoadShaderSource("shaders/vertex_shader.glsl");
     std::string fragmentShaderSource = LoadShaderSource("shaders/fragment_shader.glsl");
     GLuint shaderProgram = CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
+    std::string computeShaderSource = LoadShaderSource("shaders/grid_compute.glsl");
+    gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
 
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     GLint objectColorLoc = glGetUniformLocation(shaderProgram, "objectColor");
@@ -58,10 +63,6 @@ int main()
 
     InitializeRenderingPipeline();
     InitializeSimulationPipeline();
-
-    // Get uniform locations for grid rendering
-    GLint isGridLoc = glGetUniformLocation(shaderProgram, "u_isGrid");
-    GLint numObjsLoc = glGetUniformLocation(shaderProgram, "u_numObjs");
 
     while (!glfwWindowShouldClose(window) && running == true)
     {
@@ -89,30 +90,9 @@ int main()
             }
         }
 
-        // Draw the grid and objects
-        glUseProgram(shaderProgram);
-        glUniform1i(isGridLoc, 1);
-        int activeObjs = static_cast<int>(objs.size());
-        if (activeObjs > kMaxObjects)
-            activeObjs = kMaxObjects;
-
-        for (int i = 0; i < activeObjs; ++i)
-        {
-            sphreStateData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
-            sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
-        }
-
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(sphreStateData[0]), sphreStateData.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        glUniform1i(numObjsLoc, activeObjs);
-        glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
-        DrawGrid(shaderProgram, gridVAO, gridIndexCount);
-        glUniform1i(isGridLoc, 0);
         float epsilon = 10.0f;
         for (auto &obj : objs)
         {
-            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
             for (auto &obj2 : objs)
             {
                 if (&obj2 != &obj && !obj.initializing && !obj2.initializing)
@@ -147,7 +127,30 @@ int main()
             {
                 obj.UpdatePosition();
             }
+        }
 
+        // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
+        glUseProgram(shaderProgram);
+        int activeObjs = static_cast<int>(objs.size());
+        if (activeObjs > kMaxObjects)
+            activeObjs = kMaxObjects;
+
+        for (int i = 0; i < activeObjs; ++i)
+        {
+            sphreStateData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
+            sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
+        }
+
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(sphreStateData[0]), sphreStateData.data());
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        RunGridCompute(activeObjs);
+        glUseProgram(shaderProgram);
+        glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
+        DrawGrid(shaderProgram, gridVAO, gridIndexCount);
+        for (auto &obj : objs)
+        {
+            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
             glm::mat4 model = glm::mat4(1.0f);
             model = glm::translate(model, obj.position);
             glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));

@@ -145,3 +145,5 @@ _deps
 *.su
 *.idb
 *.pdb
+
+*.drawio.bkp

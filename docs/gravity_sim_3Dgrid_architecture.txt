@@ -443,3 +443,15 @@ GLM, and OpenGL packages.
 - Shader file paths are relative to the process working directory.
 - Error handling reports shader compilation/link failures but does not yet
   abort immediately after a shader failure.
+
+
+
+CUDA                    OpenGL Compute Shader
+
+Grid                     Dispatch dimensions
+Block                    Work-group
+Thread                   Invocation
+threadIdx                gl_LocalInvocationID
+blockIdx                 gl_WorkGroupID
+blockDim                 gl_WorkGroupSize
+gridDim                  Không có biến tương đương trực tiếp
