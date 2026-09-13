@@ -23,6 +23,41 @@ void InitializeGlfwCallbacks(GLFWwindow *window)
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
 
+void PrintComputeLimits()
+{
+    GLint maxSsboBindings = 0;
+    GLint64 maxSsboBlockSize = 0;
+    GLint maxComputeStorageBlocks = 0;
+    GLint maxWorkGroupInvocations = 0;
+    GLint maxSharedMemorySize = 0;
+    GLint maxWorkGroupSize[3] = {};
+    GLint maxWorkGroupCount[3] = {};
+
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxSsboBindings);
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &maxSsboBlockSize);
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &maxComputeStorageBlocks);
+    glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &maxWorkGroupInvocations);
+    glGetIntegerv(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE, &maxSharedMemorySize);
+
+    for (GLuint dimension = 0; dimension < 3; ++dimension)
+    {
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, dimension, &maxWorkGroupSize[dimension]);
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, dimension, &maxWorkGroupCount[dimension]);
+    }
+
+    std::cout << "OpenGL compute limits" << std::endl;
+    std::cout << "  SSBO binding points: " << maxSsboBindings << " (valid indices: 0 - " << maxSsboBindings - 1 << ")"
+              << std::endl;
+    std::cout << "  Max SSBO block size: " << maxSsboBlockSize << " bytes" << std::endl;
+    std::cout << "  Compute shader SSBO blocks: " << maxComputeStorageBlocks << std::endl;
+    std::cout << "  Max work-group size: " << maxWorkGroupSize[0] << " x " << maxWorkGroupSize[1] << " x "
+              << maxWorkGroupSize[2] << std::endl;
+    std::cout << "  Max invocations per work-group: " << maxWorkGroupInvocations << std::endl;
+    std::cout << "  Max work-group count: " << maxWorkGroupCount[0] << " x " << maxWorkGroupCount[1] << " x "
+              << maxWorkGroupCount[2] << std::endl;
+    std::cout << "  Max shared memory per work-group: " << maxSharedMemorySize << " bytes" << std::endl;
+}
+
 GLFWwindow *StartGLU()
 {
     if (!glfwInit())
@@ -49,6 +84,8 @@ GLFWwindow *StartGLU()
         glfwTerminate();
         return nullptr;
     }
+
+    PrintComputeLimits();
 
     glEnable(GL_DEPTH_TEST);
     glViewport(0, 0, 1920, 1080);
@@ -210,6 +247,8 @@ void InitializeSimulationPipeline()
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseGridSSBO);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, gridVBO);
+    // Using binding point 2 for gridVBO to avoid conflicts with sphreStateSSBO (0) and baseGridSSBO (1).
+    // From layout(std430, binding = 2) writeonly buffer DeformedGridBuffer in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gridVBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
@@ -218,21 +257,14 @@ void RunGridCompute(int activeObjs)
 {
     glUseProgram(gridComputeProgram);
     glUniform1i(glGetUniformLocation(gridComputeProgram, "u_numObjs"), activeObjs);
-    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridNodeCount"), static_cast<GLuint>(gridNodeCount));
+    const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
+    const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
+    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridWidth"), gridWidth);
+    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridHeight"), gridHeight);
 
-    constexpr GLuint localSizeX = 256;
-    const GLuint groupCount = (static_cast<GLuint>(gridNodeCount) + localSizeX - 1) / localSizeX;
-#ifndef NDEBUG
-    static bool diagnosticsReported = false;
-    if (!diagnosticsReported)
-    {
-        std::cout << "Grid compute: nodes=" << gridNodeCount << ", groups=" << groupCount
-                  << ", active objects=" << activeObjs << ", sphere SSBO bytes=" << sizeof(sphreStateData)
-                  << ", base/output grid bytes=" << gridNodeCount * sizeof(glm::vec4) << std::endl;
-        diagnosticsReported = true;
-    }
-#endif
-    glDispatchCompute(groupCount, 1, 1);
+    const GLuint groupCountX = (gridWidth + kGridLocalSizeX - 1) / kGridLocalSizeX;
+    const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;
+    glDispatchCompute(groupCountX, groupCountY, 1);
 
     // Compute writes gridVBO as an SSBO; rendering reads the same storage as vertex attributes.
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);

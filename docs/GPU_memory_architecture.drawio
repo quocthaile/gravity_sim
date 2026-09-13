@@ -1,6 +1,6 @@
-<mxfile host="Electron">
+<mxfile host="Electron" pages="2">
   <diagram name="OpenGL Compute Shader" id="vpvNmSb9niuSzlYE5DCs">
-    <mxGraphModel dx="2393" dy="1690" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="1654" math="1" shadow="0">
+    <mxGraphModel dx="1126" dy="795" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="1654" math="1" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -12,9 +12,9 @@
         <mxCell id="uyz_liCis5XBxUwPVC_x-26" parent="uyz_liCis5XBxUwPVC_x-1" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;dashPattern=12 12;fillColor=none;" value="" vertex="1">
           <mxGeometry height="370" width="190" x="848" y="170" as="geometry" />
         </mxCell>
-        <UserObject label="GPU Kernel / Compute Shader" mermaidId="n:A" mermaidBaseStyle="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=light-dark(#ECECFF,#1f2020);strokeColor=light-dark(#9370DB,#cccccc);fontColor=light-dark(#333333,#cccccc);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="GPU Kernel / Compute Shader" id="uyz_liCis5XBxUwPVC_x-2">
-          <mxCell parent="uyz_liCis5XBxUwPVC_x-1" style="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=#1ba1e2;strokeColor=#006EAF;fontColor=#ffffff;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" vertex="1">
-            <mxGeometry height="50" width="280" x="360" y="140" as="geometry" />
+        <UserObject label="GPU Kernel / Compute Shader (OpenGL)" mermaidId="n:A" mermaidBaseStyle="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=light-dark(#ECECFF,#1f2020);strokeColor=light-dark(#9370DB,#cccccc);fontColor=light-dark(#333333,#cccccc);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="GPU Kernel / Compute Shader" id="uyz_liCis5XBxUwPVC_x-2">
+          <mxCell parent="uyz_liCis5XBxUwPVC_x-1" style="html=1;whiteSpace=wrap;fillColor=#e3c800;strokeColor=#B09500;fontColor=#000000;fontFamily=Helvetica;fontSize=12;rounded=0;align=center;verticalAlign=middle;" vertex="1">
+            <mxGeometry height="50" width="280" x="360" y="172" as="geometry" />
           </mxCell>
         </UserObject>
         <UserObject label="Dispatch" mermaidId="n:B" mermaidBaseStyle="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=light-dark(#ECECFF,#1f2020);strokeColor=light-dark(#9370DB,#cccccc);fontColor=light-dark(#333333,#cccccc);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Dispatch" id="uyz_liCis5XBxUwPVC_x-3">
@@ -45,13 +45,6 @@
         <UserObject label="Registers / private state" mermaidId="n:G" mermaidBaseStyle="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=light-dark(#ECECFF,#1f2020);strokeColor=light-dark(#9370DB,#cccccc);fontColor=light-dark(#333333,#cccccc);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Registers / private state" id="uyz_liCis5XBxUwPVC_x-8">
           <mxCell parent="uyz_liCis5XBxUwPVC_x-1" style="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=#1ba1e2;strokeColor=#006EAF;fontColor=#ffffff;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" vertex="1">
             <mxGeometry height="50" width="230" x="670" y="670" as="geometry" />
-          </mxCell>
-        </UserObject>
-        <UserObject label="" mermaidId="e:A-&gt;B#0" mermaidBaseStyle="curved=1;startArrow=none;endArrow=block;endSize=7;strokeColor=light-dark(#333333,#cccccc);exitX=0.5;exitY=1;entryX=0.5;entryY=0;" mermaidBaseValue="" id="uyz_liCis5XBxUwPVC_x-9">
-          <mxCell edge="1" parent="uyz_liCis5XBxUwPVC_x-1" source="uyz_liCis5XBxUwPVC_x-2" style="curved=1;startArrow=none;endArrow=block;endSize=7;strokeColor=#006EAF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;rounded=0;fillColor=#1ba1e2;" target="uyz_liCis5XBxUwPVC_x-3">
-            <mxGeometry relative="1" as="geometry">
-              <Array as="points" />
-            </mxGeometry>
           </mxCell>
         </UserObject>
         <UserObject label="" mermaidId="e:B-&gt;C#0" mermaidBaseStyle="curved=1;startArrow=none;endArrow=block;endSize=7;strokeColor=light-dark(#333333,#cccccc);exitX=0.5;exitY=1;entryX=0.5;entryY=0;" mermaidBaseValue="" id="uyz_liCis5XBxUwPVC_x-10">
@@ -97,27 +90,77 @@
           </mxCell>
         </UserObject>
         <mxCell id="uyz_liCis5XBxUwPVC_x-22" parent="uyz_liCis5XBxUwPVC_x-1" style="whiteSpace=wrap;html=1;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fillColor=#1ba1e2;strokeColor=#006EAF;fontColor=#ffffff;strokeWidth=1;" value="Thread" vertex="1">
-          <mxGeometry height="60" width="120" x="888" y="445" as="geometry" />
+          <mxGeometry height="60" width="130" x="888" y="445" as="geometry" />
         </mxCell>
         <mxCell id="uyz_liCis5XBxUwPVC_x-23" edge="1" parent="uyz_liCis5XBxUwPVC_x-1" source="uyz_liCis5XBxUwPVC_x-5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;startArrow=block;startFill=1;endArrow=block;endFill=1;fillColor=#1ba1e2;strokeColor=#006EAF;" target="uyz_liCis5XBxUwPVC_x-22" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="uyz_liCis5XBxUwPVC_x-19" parent="uyz_liCis5XBxUwPVC_x-1" style="whiteSpace=wrap;html=1;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fillColor=#1ba1e2;strokeColor=#006EAF;fontColor=#ffffff;strokeWidth=1;" value="Block" vertex="1">
-          <mxGeometry height="60" width="120" x="888" y="350" as="geometry" />
+          <mxGeometry height="60" width="130" x="888" y="345" as="geometry" />
         </mxCell>
         <mxCell id="uyz_liCis5XBxUwPVC_x-20" edge="1" parent="uyz_liCis5XBxUwPVC_x-1" source="uyz_liCis5XBxUwPVC_x-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;startArrow=block;startFill=1;endArrow=block;endFill=1;fillColor=#1ba1e2;strokeColor=#006EAF;" target="uyz_liCis5XBxUwPVC_x-19" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <UserObject label="Grid" mermaidId="n:B" mermaidBaseStyle="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=light-dark(#ECECFF,#1f2020);strokeColor=light-dark(#9370DB,#cccccc);fontColor=light-dark(#333333,#cccccc);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Dispatch" id="uyz_liCis5XBxUwPVC_x-17">
           <mxCell parent="uyz_liCis5XBxUwPVC_x-1" style="html=1;whiteSpace=wrap;strokeWidth=1;fillColor=#1ba1e2;strokeColor=#006EAF;fontColor=#ffffff;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" vertex="1">
-            <mxGeometry height="50" width="120" x="888" y="240" as="geometry" />
+            <mxGeometry height="50" width="130" x="888" y="240" as="geometry" />
           </mxCell>
         </UserObject>
         <mxCell id="uyz_liCis5XBxUwPVC_x-18" edge="1" parent="uyz_liCis5XBxUwPVC_x-1" source="uyz_liCis5XBxUwPVC_x-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;dashed=1;dashPattern=8 8;startArrow=block;startFill=1;fillColor=#1ba1e2;strokeColor=#006EAF;" target="uyz_liCis5XBxUwPVC_x-17" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="uyz_liCis5XBxUwPVC_x-25" parent="uyz_liCis5XBxUwPVC_x-1" style="text;html=1;whiteSpace=wrap;strokeColor=#666666;fillColor=#f5f5f5;align=center;verticalAlign=middle;rounded=0;fontColor=#333333;" value="NVIDIA hierarchy" vertex="1">
-          <mxGeometry height="30" width="130" x="888" y="190" as="geometry" />
+        <mxCell id="uyz_liCis5XBxUwPVC_x-25" parent="uyz_liCis5XBxUwPVC_x-1" style="text;html=1;whiteSpace=wrap;strokeColor=#B09500;fillColor=#e3c800;align=center;verticalAlign=middle;rounded=0;fontColor=#000000;" value="NVIDIA hierarchy" vertex="1">
+          <mxGeometry height="30" width="130" x="888" y="182" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="iFjz3WRKsc3RmNI6lvMS" name="GLSL shader program">
+    <mxGraphModel dx="1914" dy="1352" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="1654" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-3" edge="1" parent="1" source="ArEpA_VkQba3nSDK5JJX-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="ArEpA_VkQba3nSDK5JJX-2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" value="Grid compute glsl" vertex="1">
+          <mxGeometry height="60" width="120" x="202" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-9" edge="1" parent="1" source="ArEpA_VkQba3nSDK5JJX-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="ArEpA_VkQba3nSDK5JJX-8" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-2" parent="1" style="whiteSpace=wrap;html=1;rounded=0;" value="layout(local_size_x = 16, local_size_y = 16) in;" vertex="1">
+          <mxGeometry height="60" width="420" x="52" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-7" parent="1" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Workgroup&lt;/h1&gt;&lt;p&gt;&lt;span style=&quot;text-align: center;&quot;&gt;Workgroup 16x16&amp;nbsp;&lt;/span&gt;&lt;/p&gt;&lt;div style=&quot;text-align: center;&quot;&gt;256 invocation/workgroup&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="200" x="492" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-18" edge="1" parent="1" source="ArEpA_VkQba3nSDK5JJX-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="ArEpA_VkQba3nSDK5JJX-17" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-8" parent="1" style="whiteSpace=wrap;html=1;rounded=0;" value="binding = 0&lt;div&gt;binding = 1&lt;/div&gt;&lt;div&gt;binding = 2&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="202" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-13" edge="1" parent="1" source="ArEpA_VkQba3nSDK5JJX-10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="ArEpA_VkQba3nSDK5JJX-12" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-10" parent="1" style="whiteSpace=wrap;html=1;rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" value="Vertex shader" vertex="1">
+          <mxGeometry height="60" width="120" x="772" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-12" parent="1" style="whiteSpace=wrap;html=1;rounded=0;" value="layout(location = 0) in vec3 aPos;" vertex="1">
+          <mxGeometry height="60" width="120" x="772" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-14" edge="1" parent="1" source="ArEpA_VkQba3nSDK5JJX-15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="ArEpA_VkQba3nSDK5JJX-16" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-15" parent="1" style="whiteSpace=wrap;html=1;rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" value="Fragment shader" vertex="1">
+          <mxGeometry height="60" width="120" x="1022" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-16" parent="1" style="whiteSpace=wrap;html=1;rounded=0;" value="Quyết định màu pixel" vertex="1">
+          <mxGeometry height="60" width="120" x="1022" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="ArEpA_VkQba3nSDK5JJX-17" parent="1" style="whiteSpace=wrap;html=1;rounded=0;strokeColor=default;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=#000000;fillColor=default;" value="&lt;div style=&quot;font-family: Consolas, &amp;quot;Courier New&amp;quot;, monospace; font-size: 14px; line-height: 19px; white-space: pre;&quot;&gt;&lt;span style=&quot;background-color: rgb(255, 255, 255);&quot;&gt;&lt;span style=&quot;&quot;&gt;glBindBufferBase&lt;/span&gt;(&lt;span style=&quot;&quot;&gt;GL_SHADER_STORAGE_BUFFER&lt;/span&gt;, &lt;span style=&quot;&quot;&gt;2&lt;/span&gt;, &lt;span style=&quot;&quot;&gt;gridVBO&lt;/span&gt;);&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;font-family: Consolas, &amp;quot;Courier New&amp;quot;, monospace; font-size: 14px; line-height: 19px; white-space: pre;&quot;&gt;&lt;div style=&quot;line-height: 19px;&quot;&gt;&lt;span style=&quot;background-color: rgb(255, 255, 255);&quot;&gt;&amp;nbsp;&lt;span style=&quot;&quot;&gt;glBindBuffer&lt;/span&gt;(&lt;span style=&quot;&quot;&gt;GL_SHADER_STORAGE_BUFFER&lt;/span&gt;, &lt;span style=&quot;&quot;&gt;0&lt;/span&gt;);&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="500" x="12" y="620" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

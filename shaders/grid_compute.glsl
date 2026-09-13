@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 struct SphereState
 {
@@ -24,16 +24,19 @@ layout(std430, binding = 2) writeonly buffer DeformedGridBuffer
 };
 
 uniform int u_numObjs;
-uniform uint u_gridNodeCount;
+uniform uint u_gridWidth;
+uniform uint u_gridHeight;
 
 void main()
 {
-    uint gridIndex = gl_GlobalInvocationID.x;
-    if (gridIndex >= u_gridNodeCount)
+    uint x = gl_GlobalInvocationID.x;
+    uint z = gl_GlobalInvocationID.y;
+    if (x >= u_gridWidth || z >= u_gridHeight)
     {
         return;
     }
 
+    uint gridIndex = z * u_gridWidth + x;
     vec3 basePosition = basePositions[gridIndex].xyz;
     float totalDisplacement = 0.0;
     for (int i = 0; i < u_numObjs; ++i)

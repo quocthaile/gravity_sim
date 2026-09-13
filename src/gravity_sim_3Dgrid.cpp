@@ -1,12 +1,16 @@
 #include "gravity_sim_3Dgrid_function.h"
 
-// Physical constants and initial simulation configuration.
+// Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
 const float kSpeedOfLight = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
-int numRandomObjects = 100;
+int numRandomObjects = 1000;
 float gridSize = 30000.0f;
 int gridDivisions = 200;
+
+// Must match layout(local_size_x = 16, local_size_y = 16) in grid_compute.glsl.
+extern constexpr GLuint kGridLocalSizeX = 16;
+extern constexpr GLuint kGridLocalSizeY = 16;
 
 // Mutable simulation and camera state.
 bool running = true;

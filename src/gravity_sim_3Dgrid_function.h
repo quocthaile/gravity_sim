@@ -148,8 +148,9 @@ static_assert(sizeof(SphreStateCpu) == 2 * sizeof(glm::vec4),
               "SphreStateCpu must be a vec4 pair for std430 compatibility.");
 static_assert(alignof(SphreStateCpu) == alignof(glm::vec4), "SphreStateCpu must respect vec4 alignment.");
 
-inline constexpr int kMaxObjects = 200;
-
+// Compile-time object capacity: required here because sphreStateData is a std::array.
+// Change this together with the intended maximum number of CPU objects uploaded to the SSBO.
+inline constexpr int kMaxObjects = 1000;
 extern bool running;
 extern bool pause;
 extern glm::vec3 cameraPos;
@@ -165,6 +166,8 @@ extern float initMass;
 extern int numRandomObjects;
 extern float gridSize;
 extern int gridDivisions;
+extern const GLuint kGridLocalSizeX;
+extern const GLuint kGridLocalSizeY;
 extern std::vector<Object> objs;
 extern GLuint gridVAO;
 extern GLuint gridVBO;
