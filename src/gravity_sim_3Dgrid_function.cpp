@@ -11,7 +11,8 @@ std::string LoadShaderSource(const std::string &filePath)
         throw std::runtime_error("Unable to open shader file: " + filePath);
     }
 
-    return std::string(std::istreambuf_iterator<char>(shaderFile), std::istreambuf_iterator<char>());
+    return std::string(std::istreambuf_iterator<char>(shaderFile),
+                       std::istreambuf_iterator<char>());
 }
 
 void InitializeGlfwCallbacks(GLFWwindow *window)
@@ -46,16 +47,17 @@ void PrintComputeLimits()
     }
 
     std::cout << "OpenGL compute limits" << std::endl;
-    std::cout << "  SSBO binding points: " << maxSsboBindings << " (valid indices: 0 - " << maxSsboBindings - 1 << ")"
-              << std::endl;
+    std::cout << "  SSBO binding points: " << maxSsboBindings << " (valid indices: 0 - "
+              << maxSsboBindings - 1 << ")" << std::endl;
     std::cout << "  Max SSBO block size: " << maxSsboBlockSize << " bytes" << std::endl;
     std::cout << "  Compute shader SSBO blocks: " << maxComputeStorageBlocks << std::endl;
-    std::cout << "  Max work-group size: " << maxWorkGroupSize[0] << " x " << maxWorkGroupSize[1] << " x "
-              << maxWorkGroupSize[2] << std::endl;
+    std::cout << "  Max work-group size: " << maxWorkGroupSize[0] << " x " << maxWorkGroupSize[1]
+              << " x " << maxWorkGroupSize[2] << std::endl;
     std::cout << "  Max invocations per work-group: " << maxWorkGroupInvocations << std::endl;
-    std::cout << "  Max work-group count: " << maxWorkGroupCount[0] << " x " << maxWorkGroupCount[1] << " x "
-              << maxWorkGroupCount[2] << std::endl;
-    std::cout << "  Max shared memory per work-group: " << maxSharedMemorySize << " bytes" << std::endl;
+    std::cout << "  Max work-group count: " << maxWorkGroupCount[0] << " x " << maxWorkGroupCount[1]
+              << " x " << maxWorkGroupCount[2] << std::endl;
+    std::cout << "  Max shared memory per work-group: " << maxSharedMemorySize << " bytes"
+              << std::endl;
 }
 
 GLFWwindow *StartGLU()
@@ -172,8 +174,8 @@ GLuint CreateComputeProgram(const char *computeSource)
     return computeProgram;
 }
 
-void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount, GLuint *ebo,
-                       const unsigned int *indices, size_t indexCount)
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount,
+                       GLuint *EBO, const unsigned int *indices, size_t indexCount)
 {
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
@@ -185,11 +187,12 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t v
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
 
-    if (ebo != nullptr)
+    if (EBO != nullptr)
     {
-        glGenBuffers(1, ebo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices, GL_STATIC_DRAW);
+        glGenBuffers(1, EBO);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices,
+                     GL_STATIC_DRAW);
     }
 
     glBindVertexArray(0);
@@ -201,27 +204,29 @@ void InitializeRenderingPipeline()
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     gridNodeCount = gridVertices.size() / 3;
     gridIndexCount = gridIndices.size();
-
+    // Create a vector of glm::vec4 for the base grid positions, with w set to 1.0f for each vertex.
     std::vector<glm::vec4> basePositions;
     basePositions.reserve(gridNodeCount);
     for (size_t i = 0; i < gridNodeCount; ++i)
     {
-        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1], gridVertices[i * 3 + 2], 1.0f);
+        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
+                                   gridVertices[i * 3 + 2], 1.0f);
     }
 
     glGenVertexArrays(1, &gridVAO);
     glGenBuffers(1, &gridVBO);
     glGenBuffers(1, &gridEBO);
-
     glBindVertexArray(gridVAO);
     glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-    glBufferData(GL_ARRAY_BUFFER, basePositions.size() * sizeof(glm::vec4), basePositions.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, basePositions.size() * sizeof(glm::vec4), basePositions.data(),
+                 GL_DYNAMIC_DRAW);
+    // location 0, 3 positions, type float, not normalized, stride is size of glm::vec4, offset is 0
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
     glEnableVertexAttribArray(0);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int), gridIndices.data(),
-                 GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int),
+                 gridIndices.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
 }
 
@@ -229,7 +234,10 @@ void InitializeSimulationPipeline()
 {
     glGenBuffers(1, &sphreStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(sphreStateData), sphreStateData.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(sphreStateData), sphreStateData.data(),
+                 GL_DYNAMIC_DRAW);
+    // Bind sphreStateSSBO to binding point 0, as specified in the compute shader.
+    // Binding point 0 is used for the SphereStateBuffer in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sphreStateSSBO);
 
     std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
@@ -237,20 +245,25 @@ void InitializeSimulationPipeline()
     basePositions.reserve(gridNodeCount);
     for (size_t i = 0; i < gridNodeCount; ++i)
     {
-        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1], gridVertices[i * 3 + 2], 1.0f);
+        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
+                                   gridVertices[i * 3 + 2], 1.0f);
     }
-
     glGenBuffers(1, &baseGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseGridSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, basePositions.size() * sizeof(glm::vec4), basePositions.data(),
-                 GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, basePositions.size() * sizeof(glm::vec4),
+                 basePositions.data(), GL_STATIC_DRAW);
+    // Bind baseGridSSBO correctly to binding point 1, as specified in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseGridSSBO);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, gridVBO);
-    // Using binding point 2 for gridVBO to avoid conflicts with sphreStateSSBO (0) and baseGridSSBO (1).
-    // From layout(std430, binding = 2) writeonly buffer DeformedGridBuffer in the compute shader.
+    // Using binding point 2 for gridVBO to avoid conflicts with sphreStateSSBO (0) and baseGridSSBO
+    // (1). From layout(std430, binding = 2) writeonly buffer DeformedGridBuffer in the compute
+    // shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gridVBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    // binding 0 → sphreStateSSBO
+    // binding 1 → baseGridSSBO
+    // binding 2 → gridVBO
 }
 
 void RunGridCompute(int activeObjs)
@@ -507,9 +520,10 @@ std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, flo
 
         float mass = massDist(rng);
         generated.emplace_back(position, velocity, mass, 3344.0f);
-        generated.back().color = glm::vec4(0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
-                                           0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
-                                           0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
+        generated.back().color =
+            glm::vec4(0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
+                      0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
+                      0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
     }
 
     return generated;

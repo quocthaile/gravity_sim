@@ -455,3 +455,5 @@ threadIdx                gl_LocalInvocationID
 blockIdx                 gl_WorkGroupID
 blockDim                 gl_WorkGroupSize
 gridDim                  Không có biến tương đương trực tiếp
+
+
