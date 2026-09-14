@@ -21,10 +21,13 @@ GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
 GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
-void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount, GLuint *ebo = nullptr,
-                       const unsigned int *indices = nullptr, size_t indexCount = 0);
-void InitializeRenderingPipeline();
-void InitializeSimulationPipeline();
+void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
+                       GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
+                       size_t indexCount = 0);
+std::vector<glm::vec4> CreateBaseGridGPU();
+void InitializeRenderingPipeline(const std::vector<glm::vec4> &basePositions);
+void InitializeSimulationPipeline(const std::vector<glm::vec4> &basePositions);
+void InitializeGridPipeline();
 void RunGridCompute(int activeObjs);
 void Cleanup(GLuint shaderProgram);
 void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
@@ -65,7 +68,8 @@ class Object
         this->velocity = initVelocity;
         this->mass = mass;
         this->density = density;
-        this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
+        this->radius =
+            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
         this->rs = (2 * kGravitationalConstant * this->mass) / (kSpeedOfLight * kSpeedOfLight);
         std::vector<float> vertices = DrawSphereMesh();
         vertexCount = vertices.size();
@@ -105,14 +109,16 @@ class Object
         this->position[0] += this->velocity[0] / 94;
         this->position[1] += this->velocity[1] / 94;
         this->position[2] += this->velocity[2] / 94;
-        this->radius = pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
+        this->radius =
+            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
 
     void UpdateVertexBuffer()
     {
         std::vector<float> vertices = DrawSphereMesh();
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(),
+                     GL_STATIC_DRAW);
     }
 
     glm::vec3 GetPosition() const { return this->position; }
@@ -146,11 +152,9 @@ struct SphreStateCpu
 
 static_assert(sizeof(SphreStateCpu) == 2 * sizeof(glm::vec4),
               "SphreStateCpu must be a vec4 pair for std430 compatibility.");
-static_assert(alignof(SphreStateCpu) == alignof(glm::vec4), "SphreStateCpu must respect vec4 alignment.");
+static_assert(alignof(SphreStateCpu) == alignof(glm::vec4),
+              "SphreStateCpu must respect vec4 alignment.");
 
-// Compile-time object capacity: required here because sphreStateData is a std::array.
-// Change this together with the intended maximum number of CPU objects uploaded to the SSBO.
-inline constexpr int kMaxObjects = 1000;
 extern bool running;
 extern bool pause;
 extern glm::vec3 cameraPos;
@@ -175,6 +179,7 @@ extern GLuint gridEBO;
 extern GLuint sphreStateSSBO;
 extern GLuint gridComputeProgram;
 extern GLuint baseGridSSBO;
+extern GLuint deformedGridSSBO;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
-extern std::array<SphreStateCpu, kMaxObjects> sphreStateData;
+extern std::vector<SphreStateCpu> sphreStateData;

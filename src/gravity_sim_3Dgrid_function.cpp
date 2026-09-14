@@ -10,7 +10,6 @@ std::string LoadShaderSource(const std::string &filePath)
     {
         throw std::runtime_error("Unable to open shader file: " + filePath);
     }
-
     return std::string(std::istreambuf_iterator<char>(shaderFile),
                        std::istreambuf_iterator<char>());
 }
@@ -198,72 +197,76 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t v
     glBindVertexArray(0);
 }
 
-void InitializeRenderingPipeline()
+std::vector<glm::vec4> CreateBaseGridGPU()
 {
     std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
-    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
-    gridNodeCount = gridVertices.size() / 3;
-    gridIndexCount = gridIndices.size();
-    // Create a vector of glm::vec4 for the base grid positions, with w set to 1.0f for each vertex.
-    std::vector<glm::vec4> basePositions;
-    basePositions.reserve(gridNodeCount);
-    for (size_t i = 0; i < gridNodeCount; ++i)
+    const size_t nodeCount = gridVertices.size() / 3;
+    std::vector<glm::vec4> gpuGridVertices;
+    gpuGridVertices.reserve(nodeCount);
+    for (size_t i = 0; i < nodeCount; ++i)
     {
-        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
-                                   gridVertices[i * 3 + 2], 1.0f);
+        gpuGridVertices.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
+                                     gridVertices[i * 3 + 2], 1.0f);
     }
+    return gpuGridVertices;
+}
+
+void InitializeRenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
+{
+    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
+    gridNodeCount = gpuGridVertices.size();
+    gridIndexCount = gridIndices.size();
 
     glGenVertexArrays(1, &gridVAO);
     glGenBuffers(1, &gridVBO);
     glGenBuffers(1, &gridEBO);
     glBindVertexArray(gridVAO);
     glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-    glBufferData(GL_ARRAY_BUFFER, basePositions.size() * sizeof(glm::vec4), basePositions.data(),
-                 GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4),
+                 gpuGridVertices.data(), GL_DYNAMIC_DRAW);
     // location 0, 3 positions, type float, not normalized, stride is size of glm::vec4, offset is 0
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
     glEnableVertexAttribArray(0);
-
+    // Bind the EBO and upload the index data
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int),
                  gridIndices.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
 }
 
-void InitializeSimulationPipeline()
+void InitializeSimulationPipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
+    // Create the Shader Storage Buffer Object (SSBO) for sphere state data.
     glGenBuffers(1, &sphreStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(sphreStateData), sphreStateData.data(),
-                 GL_DYNAMIC_DRAW);
+    sphreStateData.resize(objs.size());
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sphreStateData.size() * sizeof(SphreStateCpu),
+                 sphreStateData.data(), GL_DYNAMIC_DRAW);
     // Bind sphreStateSSBO to binding point 0, as specified in the compute shader.
-    // Binding point 0 is used for the SphereStateBuffer in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sphreStateSSBO);
 
-    std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
-    std::vector<glm::vec4> basePositions;
-    basePositions.reserve(gridNodeCount);
-    for (size_t i = 0; i < gridNodeCount; ++i)
-    {
-        basePositions.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
-                                   gridVertices[i * 3 + 2], 1.0f);
-    }
+    // Create the Shader Storage Buffer Object (SSBO) for the base grid positions readonly buffer.
     glGenBuffers(1, &baseGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseGridSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, basePositions.size() * sizeof(glm::vec4),
-                 basePositions.data(), GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4),
+                 gpuGridVertices.data(), GL_STATIC_DRAW);
     // Bind baseGridSSBO correctly to binding point 1, as specified in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseGridSSBO);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, gridVBO);
-    // Using binding point 2 for gridVBO to avoid conflicts with sphreStateSSBO (0) and baseGridSSBO
-    // (1). From layout(std430, binding = 2) writeonly buffer DeformedGridBuffer in the compute
-    // shader.
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gridVBO);
+    glGenBuffers(1, &deformedGridSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, deformedGridSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4), nullptr,
+                 GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, deformedGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    // binding 0 → sphreStateSSBO
-    // binding 1 → baseGridSSBO
-    // binding 2 → gridVBO
+    // binding 0: sphreStateSSBO, binding 1: baseGridSSBO, binding 2: deformedGridSSBO
+}
+
+void InitializeGridPipeline()
+{
+    std::vector<glm::vec4> gpuGridVertices = CreateBaseGridGPU();
+    InitializeRenderingPipeline(gpuGridVertices);
+    InitializeSimulationPipeline(gpuGridVertices);
 }
 
 void RunGridCompute(int activeObjs)
@@ -279,7 +282,15 @@ void RunGridCompute(int activeObjs)
     const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;
     glDispatchCompute(groupCountX, groupCountY, 1);
 
-    // Compute writes gridVBO as an SSBO; rendering reads the same storage as vertex attributes.
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    glBindBuffer(GL_COPY_READ_BUFFER, deformedGridSSBO);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, gridVBO);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
+                        gridNodeCount * sizeof(glm::vec4));
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
 }
 
@@ -296,6 +307,7 @@ void Cleanup(GLuint shaderProgram)
     glDeleteBuffers(1, &gridEBO);
     glDeleteBuffers(1, &sphreStateSSBO);
     glDeleteBuffers(1, &baseGridSSBO);
+    glDeleteBuffers(1, &deformedGridSSBO);
     glDeleteProgram(gridComputeProgram);
     glDeleteProgram(shaderProgram);
     glfwTerminate();
@@ -428,14 +440,14 @@ glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
     return glm::vec3(x, y, z);
 }
 
-void DrawGrid(GLuint shaderProgram, GLuint gridVao, size_t indexCount)
+void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount)
 {
-    glUseProgram(shaderProgram);
+    // glUseProgram(shaderProgram);
     glm::mat4 model = glm::mat4(1.0f);
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
-    glBindVertexArray(gridVao);
-    glPointSize(5.0f);
+    glBindVertexArray(gridVAO);
+    // glPointSize(5.0f);
     glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
@@ -448,7 +460,7 @@ std::vector<float> CreateGridVertices(float size, int divisions)
 
     float step = size / divisions;
     float halfSize = size / 2.0f;
-    float baseY = -900.0f;
+    float baseY = -800.0f;
 
     for (int zStep = 0; zStep <= divisions; ++zStep)
     {
