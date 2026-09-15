@@ -20,7 +20,7 @@ void InitializeGlfwCallbacks(GLFWwindow *window)
     glfwSetScrollCallback(window, ScrollCallback);
     glfwSetKeyCallback(window, KeyCallback);
     glfwSetMouseButtonCallback(window, MouseButtonCallback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 }
 
 void PrintComputeLimits()
@@ -61,14 +61,17 @@ void PrintComputeLimits()
 
 GLFWwindow *StartGLU()
 {
+    // Initialize GLFW and create a window with an OpenGL context.
     if (!glfwInit())
     {
-        std::cout << "Failed to initialize GLFW, panic" << std::endl;
+        std::cout << "Failed to initialize GLFW." << std::endl;
         return nullptr;
     }
+    // Set the OpenGL version to 4.3 and use the core profile.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    // Create a window with the specified dimensions and title.
     GLFWwindow *window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
     if (!window)
     {
@@ -77,7 +80,7 @@ GLFWwindow *StartGLU()
         return nullptr;
     }
     glfwMakeContextCurrent(window);
-
+    // Initialize GLEW to load OpenGL function pointers.
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK)
     {
@@ -85,14 +88,13 @@ GLFWwindow *StartGLU()
         glfwTerminate();
         return nullptr;
     }
-
+    // Print the OpenGL version and compute limits for debugging purposes.
     PrintComputeLimits();
-
+    // Enable depth testing and set the viewport dimensions.
     glEnable(GL_DEPTH_TEST);
     glViewport(0, 0, 1920, 1080);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
     return window;
 }
 
@@ -377,7 +379,13 @@ void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods
 
 void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
 {
-    (void)window;
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) != GLFW_PRESS)
+    {
+        lastX = static_cast<float>(xPosition);
+        lastY = static_cast<float>(yPosition);
+        return;
+    }
+
     float xOffset = xPosition - lastX;
     float yOffset = lastY - yPosition;
     lastX = xPosition;
@@ -404,8 +412,17 @@ void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
 
 void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
 {
-    (void)window;
     (void)mods;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS)
+    {
+        double xPosition = 0.0;
+        double yPosition = 0.0;
+        glfwGetCursorPos(window, &xPosition, &yPosition);
+        lastX = static_cast<float>(xPosition);
+        lastY = static_cast<float>(yPosition);
+        return;
+    }
+
     if (button == GLFW_MOUSE_BUTTON_LEFT)
     {
         if (action == GLFW_PRESS)

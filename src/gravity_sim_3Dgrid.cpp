@@ -43,6 +43,8 @@ int main()
 {
     // Initialize GLFW, create a window, and set up OpenGL context.
     GLFWwindow *window = StartGLU();
+    InitializeGlfwCallbacks(window);
+
     // Load shader sources and create shader programs.
     std::string vertexShaderSource = LoadShaderSource("shaders/vertex_shader.glsl");
     std::string fragmentShaderSource = LoadShaderSource("shaders/fragment_shader.glsl");
@@ -56,8 +58,6 @@ int main()
     // Set the shader program to use for rendering.
     glUseProgram(shaderProgram);
 
-    InitializeGlfwCallbacks(window);
-
     // projection matrix
     glm::mat4 projection =
         glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
@@ -65,12 +65,14 @@ int main()
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPos = glm::vec3(0.0f, 1000.0f, 5000.0f);
 
+    // Initialize the simulation with two primary objects: a moon and a planet.
     objs = {Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309 * pow(10, 22), 3344),
             Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219 * pow(10, 24), 5515)};
     // Add random objects to the simulation
     auto randomBodies =
         CreateRandomOrbiters(numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
     objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
+
     // Initialize the grid pipeline for GPU computation.
     InitializeGridPipeline();
 
