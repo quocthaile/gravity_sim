@@ -1,6 +1,7 @@
 #include "gravity_sim_3Dgrid_function.h"
 
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 std::string LoadShaderSource(const std::string &filePath)
@@ -12,6 +13,28 @@ std::string LoadShaderSource(const std::string &filePath)
     }
     return std::string(std::istreambuf_iterator<char>(shaderFile),
                        std::istreambuf_iterator<char>());
+}
+
+void InitializeRenderingResources(GLuint &shaderProgram, GLint &modelLocation,
+                                  GLint &objectColorLocation, GLint &viewLocation,
+                                  glm::vec3 &cameraPosition)
+{
+    std::string vertexShaderSource = LoadShaderSource("shaders/grid.vert");
+    std::string fragmentShaderSource = LoadShaderSource("shaders/grid.frag");
+    std::string computeShaderSource = LoadShaderSource("shaders/grid.comp");
+    shaderProgram = CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
+    gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
+
+    modelLocation = glGetUniformLocation(shaderProgram, "model");
+    objectColorLocation = glGetUniformLocation(shaderProgram, "objectColor");
+    viewLocation = glGetUniformLocation(shaderProgram, "view");
+    glUseProgram(shaderProgram);
+
+    glm::mat4 projection =
+        glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
+    GLint projectionLocation = glGetUniformLocation(shaderProgram, "projection");
+    glUniformMatrix4fv(projectionLocation, 1, GL_FALSE, glm::value_ptr(projection));
+    cameraPosition = glm::vec3(0.0f, 1000.0f, 5000.0f);
 }
 
 void InitializeGlfwCallbacks(GLFWwindow *window)
@@ -615,4 +638,63 @@ std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, flo
     }
 
     return generated;
+}
+
+std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomObjectCount)
+{
+    if (!objectFilePath.empty())
+    {
+        std::ifstream objectFile(objectFilePath);
+        if (!objectFile)
+        {
+            throw std::runtime_error("Unable to open object file: " + objectFilePath);
+        }
+
+        std::vector<Object> loadedObjects;
+        std::string line;
+        size_t lineNumber = 0;
+        while (std::getline(objectFile, line))
+        {
+            ++lineNumber;
+            if (line.empty() || line.front() == '#')
+            {
+                continue;
+            }
+
+            std::stringstream values(line);
+            char separator = 0;
+            float positionX = 0.0f;
+            float positionY = 0.0f;
+            float positionZ = 0.0f;
+            float velocityX = 0.0f;
+            float velocityY = 0.0f;
+            float velocityZ = 0.0f;
+            float mass = 0.0f;
+            float density = 3344.0f;
+
+            if (!(values >> positionX >> separator && separator == ',' &&
+                  values >> positionY >> separator && separator == ',' &&
+                  values >> positionZ >> separator && separator == ',' &&
+                  values >> velocityX >> separator && separator == ',' &&
+                  values >> velocityY >> separator && separator == ',' &&
+                  values >> velocityZ >> separator && separator == ',' &&
+                  values >> mass >> separator && separator == ',' && values >> density))
+            {
+                throw std::runtime_error("Invalid object data at line " +
+                                         std::to_string(lineNumber) + " in " + objectFilePath);
+            }
+
+            loadedObjects.emplace_back(glm::vec3(positionX, positionY, positionZ),
+                                       glm::vec3(velocityX, velocityY, velocityZ), mass, density);
+        }
+        return loadedObjects;
+    }
+
+    std::vector<Object> defaultObjects = {
+        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309e22f, 3344),
+        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219e24f, 5515)};
+    auto randomBodies =
+        CreateRandomOrbiters(randomObjectCount, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    defaultObjects.insert(defaultObjects.end(), randomBodies.begin(), randomBodies.end());
+    return defaultObjects;
 }

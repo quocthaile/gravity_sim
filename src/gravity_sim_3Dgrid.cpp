@@ -46,34 +46,14 @@ int main()
     GLFWwindow *window = StartGLU();
     InitializeGlfwCallbacks(window);
 
-    // Load shader sources and create shader programs.
-    std::string vertexShaderSource = LoadShaderSource("shaders/grid.vert");
-    std::string fragmentShaderSource = LoadShaderSource("shaders/grid.frag");
-    std::string computeShaderSource = LoadShaderSource("shaders/grid.comp");
-    GLuint shaderProgram =
-        CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
-    gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
-    // Get uniform locations for model, object color, and view matrices.
-    GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
-    GLint objectColorLoc = glGetUniformLocation(shaderProgram, "objectColor");
-    GLint viewLoc = glGetUniformLocation(shaderProgram, "view");
-    // Set the shader program to use for rendering.
-    glUseProgram(shaderProgram);
+    GLuint shaderProgram = 0;
+    GLint modelLoc = -1;
+    GLint objectColorLoc = -1;
+    GLint viewLoc = -1;
+    InitializeRenderingResources(shaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
 
-    // projection matrix
-    glm::mat4 projection =
-        glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
-    GLint projectionLoc = glGetUniformLocation(shaderProgram, "projection");
-    glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
-    cameraPos = glm::vec3(0.0f, 1000.0f, 5000.0f);
-
-    // Initialize the simulation with two primary objects: a moon and a planet.
-    objs = {Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309 * pow(10, 22), 3344),
-            Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219 * pow(10, 24), 5515)};
-    // Add random objects to the simulation
-    auto randomBodies =
-        CreateRandomOrbiters(numRandomObjects, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
-    objs.insert(objs.end(), randomBodies.begin(), randomBodies.end());
+    // Pass a file path here to load objects from CSV instead of using defaults.
+    objs = CreateObjects({}, numRandomObjects);
 
     // Initialize the grid pipeline for GPU computation.
     InitializeGridPipeline();

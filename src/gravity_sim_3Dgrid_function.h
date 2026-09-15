@@ -19,6 +19,9 @@ class Object;
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
+void InitializeRenderingResources(GLuint &shaderProgram, GLint &modelLocation,
+                                  GLint &objectColorLocation, GLint &viewLocation,
+                                  glm::vec3 &cameraPosition);
 GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
 void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
@@ -41,6 +44,8 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount);
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
+std::vector<Object> CreateObjects(const std::string &objectFilePath = {},
+                                  int randomObjectCount = 0);
 size_t NextObjectStateCapacity(size_t requiredCount);
 void EnsureObjectStateCapacity(size_t objectCount);
 void UploadObjectState(size_t objectCount);
