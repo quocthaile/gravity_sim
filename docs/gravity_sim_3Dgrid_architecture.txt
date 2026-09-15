@@ -62,12 +62,15 @@ Source files:
 
 Shader files:
 
-    shaders/vertex_shader.glsl
+    shaders/grid.vert
         Deforms grid vertices on the GPU and applies model, view, and
         projection transforms.
 
-    shaders/fragment_shader.glsl
+    shaders/grid.frag
         Outputs the color supplied through the objectColor uniform.
+
+    shaders/grid.comp
+        Computes the grid deformation from the object state on the GPU.
 
 Build output:
 
@@ -81,8 +84,9 @@ After building gravity_sim_3Dgrid, CMake copies the GLSL files into a
 shaders directory beside the executable. The application expects these paths
 relative to its working directory:
 
-    shaders/vertex_shader.glsl
-    shaders/fragment_shader.glsl
+    shaders/grid.vert
+    shaders/grid.frag
+    shaders/grid.comp
 
 
 3. MAIN RUNTIME COMPONENTS
@@ -422,8 +426,9 @@ The executable must be launched with a working directory that contains the
 runtime shader paths, or from the build output directory after the CMake
 POST_BUILD copy has completed:
 
-    shaders/vertex_shader.glsl
-    shaders/fragment_shader.glsl
+    shaders/grid.vert
+    shaders/grid.frag
+    shaders/grid.comp
 
 Required runtime dependencies are provided by the configured GLFW, GLEW,
 GLM, and OpenGL packages.

@@ -1,0 +1,37 @@
+{
+    "configurations": [
+        {
+            "name": "MSYS2 GCC",
+            "compilerPath": "C:/msys64/ucrt64/bin/g++.exe",
+            "cStandard": "c23",
+            "cppStandard": "c++23",
+            "intelliSenseMode": "windows-gcc-x64",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/build/**/vcpkg_installed/**/include"
+            ],
+            "defines": [
+                "GLFW_DLL"
+            ],
+            "compileCommands": "${workspaceFolder}/build/gcc-debug/compile_commands.json"
+        },
+        {
+            "name": "MSVC",
+            "compilerPath": "cl.exe",
+            "cStandard": "c23",
+            "cppStandard": "c++23",
+            "intelliSenseMode": "windows-msvc-x64",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/build/**/vcpkg_installed/**/include"
+            ],
+            "defines": [
+                "GLFW_DLL",
+                "WIN32_LEAN_AND_MEAN",
+                "NOMINMAX"
+            ],
+            "compileCommands": "${workspaceFolder}/build/msvc-release/compile_commands.json"
+        }
+    ],
+    "version": 4
+}

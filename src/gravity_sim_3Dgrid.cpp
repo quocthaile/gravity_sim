@@ -8,7 +8,7 @@ int numRandomObjects = 200;
 float gridSize = 30000.0f;
 int gridDivisions = 200;
 
-// Must match layout(local_size_x = 16, local_size_y = 16) in grid_compute.glsl.
+// Must match layout(local_size_x = 16, local_size_y = 16) in grid.comp.
 extern constexpr GLuint kGridLocalSizeX = 16;
 extern constexpr GLuint kGridLocalSizeY = 16;
 
@@ -47,9 +47,9 @@ int main()
     InitializeGlfwCallbacks(window);
 
     // Load shader sources and create shader programs.
-    std::string vertexShaderSource = LoadShaderSource("shaders/vertex_shader.glsl");
-    std::string fragmentShaderSource = LoadShaderSource("shaders/fragment_shader.glsl");
-    std::string computeShaderSource = LoadShaderSource("shaders/grid_compute.glsl");
+    std::string vertexShaderSource = LoadShaderSource("shaders/grid.vert");
+    std::string fragmentShaderSource = LoadShaderSource("shaders/grid.frag");
+    std::string computeShaderSource = LoadShaderSource("shaders/grid.comp");
     GLuint shaderProgram =
         CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
     gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
