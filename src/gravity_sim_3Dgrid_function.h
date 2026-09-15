@@ -28,7 +28,7 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeRenderingPipeline(const std::vector<glm::vec4> &basePositions);
 void InitializeSimulationPipeline(const std::vector<glm::vec4> &basePositions);
 void InitializeGridPipeline();
-void RunGridCompute(int activeObjs);
+void RunGridCompute(size_t objectCount);
 void Cleanup(GLuint shaderProgram);
 void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
 void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods);
@@ -41,6 +41,9 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount);
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
+size_t NextObjectStateCapacity(size_t requiredCount);
+void EnsureObjectStateCapacity(size_t objectCount);
+void UploadObjectState(size_t objectCount);
 
 class Object
 {
@@ -183,3 +186,4 @@ extern GLuint deformedGridSSBO;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
 extern std::vector<SphreStateCpu> sphreStateData;
+extern size_t objectStateCapacity;

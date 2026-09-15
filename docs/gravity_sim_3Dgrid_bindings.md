@@ -59,13 +59,77 @@ layout(std430, binding = 2) writeonly buffer DeformedGridBuffer
 The numeric binding is the contract. The C++ variable name and GLSL block name
 do not need to be identical.
 
+## Object-state SSBO capacity management
+
+The object-state buffer is now managed with an explicit GPU capacity separate from the current logical object count.
+
+```cpp
+size_t objectStateCapacity = 0;
+
+void EnsureObjectStateCapacity(size_t objectCount)
+{
+    if (objectCount <= objectStateCapacity)
+    {
+        return;
+    }
+
+    size_t newCapacity = objectStateCapacity == 0 ? 256 : objectStateCapacity * 2;
+    while (newCapacity < objectCount)
+    {
+        newCapacity *= 2;
+    }
+
+    sphreStateData.reserve(newCapacity);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity * sizeof(SphreStateCpu), nullptr,
+                 GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    objectStateCapacity = newCapacity;
+}
+```
+
+Each frame, the CPU fills only the real element range:
+
+```cpp
+const size_t objectCount = objs.size();
+EnsureObjectStateCapacity(objectCount);
+sphreStateData.resize(objectCount);
+
+for (size_t i = 0; i < objectCount; ++i)
+{
+    sphreStateData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
+    sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
+}
+
+UploadObjectState(objectCount);
+```
+
+The upload path intentionally uses the active data length instead of the full GPU capacity:
+
+```cpp
+void UploadObjectState(size_t objectCount)
+{
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, objectCount * sizeof(SphreStateCpu),
+                    sphreStateData.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+```
+
+This preserves the separation between:
+
+- `objectCount`: the logical count of objects currently uploaded and computed
+- `objectStateCapacity`: the SSBO reservation that can grow geometrically without reallocating for each small increment
+
 ## Compute dispatch and GPU copy
 
 Each frame, the C++ code performs this sequence:
 
 ```cpp
 glUseProgram(gridComputeProgram);
-glDispatchCompute(groupCountX, groupCountY, 1);
+RunGridCompute(objectCount);
 
 glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
@@ -163,12 +227,22 @@ GLint projectionLoc = glGetUniformLocation(shaderProgram, "projection");
 GLint objectColorLoc = glGetUniformLocation(shaderProgram, "objectColor");
 ```
 
-The compute program uses:
+The compute program uses the object-count naming that matches the current
+CPU-side semantics:
 
 ```cpp
-glGetUniformLocation(gridComputeProgram, "u_numObjs");
+glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_objectCount"),
+            static_cast<GLuint>(objectCount));
 glGetUniformLocation(gridComputeProgram, "u_gridWidth");
 glGetUniformLocation(gridComputeProgram, "u_gridHeight");
+```
+
+The corresponding GLSL declaration is:
+
+```glsl
+uniform uint u_objectCount;
+uniform uint u_gridWidth;
+uniform uint u_gridHeight;
 ```
 
 Uniform location values can change when a shader is relinked. The uniform name

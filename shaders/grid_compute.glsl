@@ -8,22 +8,13 @@ struct SphereState
     vec4 velocity_radius;
 };
 
-layout(std430, binding = 0) readonly buffer SphereStateBuffer
-{
-    SphereState spheres[];
-};
+layout(std430, binding = 0) readonly buffer SphereStateBuffer { SphereState spheres[]; };
 
-layout(std430, binding = 1) readonly buffer BaseGridBuffer
-{
-    vec4 basePositions[];
-};
+layout(std430, binding = 1) readonly buffer BaseGridBuffer { vec4 basePositions[]; };
 
-layout(std430, binding = 2) writeonly buffer DeformedGridBuffer
-{
-    vec4 deformedPositions[];
-};
+layout(std430, binding = 2) writeonly buffer DeformedGridBuffer { vec4 deformedPositions[]; };
 
-uniform int u_numObjs;
+uniform uint u_objectCount;
 uniform uint u_gridWidth;
 uniform uint u_gridHeight;
 
@@ -39,7 +30,7 @@ void main()
     uint gridIndex = z * u_gridWidth + x;
     vec3 basePosition = basePositions[gridIndex].xyz;
     float totalDisplacement = 0.0;
-    for (int i = 0; i < u_numObjs; ++i)
+    for (uint i = 0; i < u_objectCount; ++i)
     {
         vec3 objPos = spheres[i].position_mass.xyz;
         float objRs = spheres[i].velocity_radius.w;
@@ -54,5 +45,6 @@ void main()
         }
     }
 
-    deformedPositions[gridIndex] = vec4(basePosition.x, basePosition.y + totalDisplacement, basePosition.z, 1.0);
+    deformedPositions[gridIndex] =
+        vec4(basePosition.x, basePosition.y + totalDisplacement, basePosition.z, 1.0);
 }

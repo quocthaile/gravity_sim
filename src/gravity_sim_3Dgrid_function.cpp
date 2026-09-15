@@ -16,10 +16,14 @@ std::string LoadShaderSource(const std::string &filePath)
 
 void InitializeGlfwCallbacks(GLFWwindow *window)
 {
+    // Mouse callbacks for camera rotation and zooming.
     glfwSetCursorPosCallback(window, MouseCallback);
     glfwSetScrollCallback(window, ScrollCallback);
     glfwSetKeyCallback(window, KeyCallback);
+    // Mouse button callback for creating and launching objects.
     glfwSetMouseButtonCallback(window, MouseButtonCallback);
+    // GLFW_CURSOR_NORMAL allows the mouse to move freely and be visible, enabling camera rotation
+    // with the right mouse button.
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 }
 
@@ -213,6 +217,58 @@ std::vector<glm::vec4> CreateBaseGridGPU()
     return gpuGridVertices;
 }
 
+size_t NextObjectStateCapacity(size_t requiredCount)
+{
+    if (requiredCount == 0)
+    {
+        return 0;
+    }
+
+    size_t capacity = objectStateCapacity == 0 ? 256 : objectStateCapacity;
+    while (capacity < requiredCount)
+    {
+        capacity *= 2;
+    }
+
+    return capacity;
+}
+
+void EnsureObjectStateCapacity(size_t objectCount)
+{
+    if (objectCount <= objectStateCapacity)
+    {
+        return;
+    }
+
+    const size_t newCapacity = NextObjectStateCapacity(objectCount);
+    if (newCapacity <= objectStateCapacity)
+    {
+        return;
+    }
+
+    sphreStateData.reserve(newCapacity);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity * sizeof(SphreStateCpu), nullptr,
+                 GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    objectStateCapacity = newCapacity;
+}
+
+void UploadObjectState(size_t objectCount)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, objectCount * sizeof(SphreStateCpu),
+                    sphreStateData.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
 void InitializeRenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
@@ -241,9 +297,8 @@ void InitializeSimulationPipeline(const std::vector<glm::vec4> &gpuGridVertices)
     // Create the Shader Storage Buffer Object (SSBO) for sphere state data.
     glGenBuffers(1, &sphreStateSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
+    EnsureObjectStateCapacity(objs.size());
     sphreStateData.resize(objs.size());
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sphreStateData.size() * sizeof(SphreStateCpu),
-                 sphreStateData.data(), GL_DYNAMIC_DRAW);
     // Bind sphreStateSSBO to binding point 0, as specified in the compute shader.
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sphreStateSSBO);
 
@@ -271,10 +326,11 @@ void InitializeGridPipeline()
     InitializeSimulationPipeline(gpuGridVertices);
 }
 
-void RunGridCompute(int activeObjs)
+void RunGridCompute(size_t objectCount)
 {
     glUseProgram(gridComputeProgram);
-    glUniform1i(glGetUniformLocation(gridComputeProgram, "u_numObjs"), activeObjs);
+    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_objectCount"),
+                 static_cast<GLuint>(objectCount));
     const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
     const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
     glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridWidth"), gridWidth);
@@ -385,19 +441,22 @@ void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
         lastY = static_cast<float>(yPosition);
         return;
     }
-
+    // 0----> +x
+    // |
+    // |
+    // +y
     float xOffset = xPosition - lastX;
     float yOffset = lastY - yPosition;
     lastX = xPosition;
     lastY = yPosition;
-
+    // Adjust the sensitivity of the mouse movement for smoother camera rotation.
     float sensitivity = 0.1f;
     xOffset *= sensitivity;
     yOffset *= sensitivity;
-
+    // Update the yaw and pitch angles based on mouse movement.
     yaw += xOffset;
     pitch += yOffset;
-
+    // Constrain the pitch angle to prevent the camera from flipping upside down.
     if (pitch > 89.0f)
         pitch = 89.0f;
     if (pitch < -89.0f)

@@ -30,7 +30,7 @@ std::vector<Object> objs = {};
 GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-GLuint shaderProgram;
+// GLuint shaderProgram;
 GLuint sphreStateSSBO;
 GLuint gridComputeProgram;
 GLuint baseGridSSBO = 0;
@@ -38,6 +38,7 @@ GLuint deformedGridSSBO = 0;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
 std::vector<SphreStateCpu> sphreStateData;
+size_t objectStateCapacity = 0;
 
 int main()
 {
@@ -49,7 +50,8 @@ int main()
     std::string vertexShaderSource = LoadShaderSource("shaders/vertex_shader.glsl");
     std::string fragmentShaderSource = LoadShaderSource("shaders/fragment_shader.glsl");
     std::string computeShaderSource = LoadShaderSource("shaders/grid_compute.glsl");
-    shaderProgram = CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
+    GLuint shaderProgram =
+        CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
     gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
     // Get uniform locations for model, object color, and view matrices.
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
@@ -151,16 +153,8 @@ int main()
         // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
         glUseProgram(shaderProgram);
         const size_t objectCount = objs.size();
-        if (sphreStateData.size() < objectCount)
-        {
-            sphreStateData.resize(objectCount);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, sphreStateData.size() * sizeof(SphreStateCpu),
-                         sphreStateData.data(), GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        }
-
-        int activeObjs = static_cast<int>(objectCount);
+        EnsureObjectStateCapacity(objectCount);
+        sphreStateData.resize(objectCount);
 
         for (size_t i = 0; i < objectCount; ++i)
         {
@@ -168,12 +162,9 @@ int main()
             sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
         }
 
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, activeObjs * sizeof(sphreStateData[0]),
-                        sphreStateData.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        UploadObjectState(objectCount);
         // Run the compute shader to update the grid based on the current state of the objects.
-        RunGridCompute(activeObjs);
+        RunGridCompute(objectCount);
 
         glUseProgram(shaderProgram);
         glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
