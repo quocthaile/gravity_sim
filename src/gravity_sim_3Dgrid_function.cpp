@@ -247,7 +247,7 @@ size_t NextObjectStateCapacity(size_t requiredCount)
         return 0;
     }
 
-    size_t capacity = objectStateCapacity == 0 ? 256 : objectStateCapacity;
+    size_t capacity = (objectStateCapacity == 0) ? 256 : objectStateCapacity;
     while (capacity < requiredCount)
     {
         capacity *= 2;
@@ -392,6 +392,27 @@ void Cleanup(GLuint shaderProgram)
     glDeleteProgram(gridComputeProgram);
     glDeleteProgram(shaderProgram);
     glfwTerminate();
+}
+
+void BeginFrame() { glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
+
+void UpdateInitializingObject(GLFWwindow *window)
+{
+    if (objs.empty() || !objs.back().initializing)
+        return;
+
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+    {
+        Object &initializingObject = objs.back();
+        initializingObject.mass *= 1.0 + 1.0 * deltaTime;
+        initializingObject.rs = (2 * kGravitationalConstant * initializingObject.mass) /
+                                (kSpeedOfLight * kSpeedOfLight);
+        initializingObject.radius =
+            pow((3 * initializingObject.mass / initializingObject.density) / (4 * 3.14159265359f),
+                1.0f / 3.0f) /
+            100000.0f;
+        initializingObject.UpdateVertexBuffer();
+    }
 }
 
 void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition)
@@ -539,9 +560,10 @@ glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
     return glm::vec3(x, y, z);
 }
 
-void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount)
+void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount, GLint objectColorLocation)
 {
-    // glUseProgram(shaderProgram);
+    glUseProgram(shaderProgram);
+    glUniform4f(objectColorLocation, 1.0f, 1.0f, 1.0f, 0.25f);
     glm::mat4 model = glm::mat4(1.0f);
     GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
@@ -549,6 +571,19 @@ void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount)
     // glPointSize(5.0f);
     glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
+}
+
+void DrawObjects(const std::vector<Object> &objects, GLint modelLocation, GLint objectColorLocation)
+{
+    for (const auto &obj : objects)
+    {
+        glUniform4f(objectColorLocation, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+        glm::mat4 model = glm::mat4(1.0f);
+        model = glm::translate(model, obj.position);
+        glUniformMatrix4fv(modelLocation, 1, GL_FALSE, glm::value_ptr(model));
+        glBindVertexArray(obj.VAO);
+        glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
+    }
 }
 
 std::vector<float> CreateGridVertices(float size, int divisions)

@@ -30,7 +30,6 @@ std::vector<Object> objs = {};
 GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-// GLuint shaderProgram;
 GLuint sphreStateSSBO;
 GLuint gridComputeProgram;
 GLuint baseGridSSBO = 0;
@@ -51,40 +50,23 @@ int main()
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
     InitializeRenderingResources(shaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
-
     // Pass a file path here to load objects from CSV instead of using defaults.
     objs = CreateObjects({}, numRandomObjects);
-
+    size_t objectCount = objs.size();
     // Initialize the grid pipeline for GPU computation.
     InitializeGridPipeline();
-
+    // Main render loop: update object states, run compute shader, and render scene.
     while (!glfwWindowShouldClose(window) && running == true)
     {
+        // Calculate delta time for smooth motion and physics updates.
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
+        BeginFrame();
         UpdateCamera(shaderProgram, viewLoc, cameraPos);
-        if (!objs.empty() && objs.back().initializing)
-        {
-            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
-            {
-                // Increase mass by 1% per second
-                objs.back().mass *= 1.0 + 1.0 * deltaTime;
-                objs.back().rs = (2 * kGravitationalConstant * objs.back().mass) /
-                                 (kSpeedOfLight * kSpeedOfLight);
-                // Update radius based on new mass
-                objs.back().radius =
-                    pow((3 * objs.back().mass / objs.back().density) / (4 * 3.14159265359f),
-                        1.0f / 3.0f) /
-                    100000.0f;
-                // Update vertex data
-                objs.back().UpdateVertexBuffer();
-            }
-        }
-
+        UpdateInitializingObject(window);
+        // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
         for (auto &obj : objs)
         {
@@ -132,7 +114,7 @@ int main()
 
         // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
         glUseProgram(shaderProgram);
-        const size_t objectCount = objs.size();
+        objectCount = objs.size();
         EnsureObjectStateCapacity(objectCount);
         sphreStateData.resize(objectCount);
 
@@ -146,20 +128,9 @@ int main()
         // Run the compute shader to update the grid based on the current state of the objects.
         RunGridCompute(objectCount);
 
-        glUseProgram(shaderProgram);
-        glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f);
-        DrawGrid(shaderProgram, gridVAO, gridIndexCount);
+        DrawGrid(shaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
-        for (auto &obj : objs)
-        {
-
-            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
-            glm::mat4 model = glm::mat4(1.0f);
-            model = glm::translate(model, obj.position);
-            glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
-            glBindVertexArray(obj.VAO);
-            glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
-        }
+        DrawObjects(objs, modelLoc, objectColorLoc);
         // Swap buffers and poll for events.
         glfwSwapBuffers(window);
         glfwPollEvents();
