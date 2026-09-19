@@ -240,39 +240,61 @@ std::vector<glm::vec4> CreateBaseGridGPU()
     return gpuGridVertices;
 }
 
-size_t NextObjectStateCapacity(size_t requiredCount)
+size_t CalculateObjectStateBufferCapacity(size_t requiredCount)
 {
     if (requiredCount == 0)
     {
         return 0;
     }
-
+    // Start with a minimum capacity of 256 and double it until it meets or exceeds the required
+    // count.
     size_t capacity = (objectStateCapacity == 0) ? 256 : objectStateCapacity;
+    // Ensure the capacity is at least as large as the required count.
     while (capacity < requiredCount)
     {
         capacity *= 2;
     }
-
     return capacity;
 }
 
-void EnsureObjectStateCapacity(size_t objectCount)
+void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, size_t objectCount)
 {
-    if (objectCount <= objectStateCapacity)
+    constexpr size_t kMinimumObjectStateCapacity = 256;
+    size_t newCapacity = objectStateCapacity;
+
+    if (objectCount > objectStateCapacity)
+    {
+        newCapacity = CalculateObjectStateBufferCapacity(objectCount);
+    }
+    else if (objectStateCapacity > kMinimumObjectStateCapacity &&
+             objectCount <= objectStateCapacity / 4)
+    {
+        newCapacity = objectStateCapacity / 2;
+        if (newCapacity < kMinimumObjectStateCapacity)
+        {
+            newCapacity = kMinimumObjectStateCapacity;
+        }
+    }
+
+    stateData.resize(objectCount);
+    if (newCapacity == objectStateCapacity)
     {
         return;
     }
 
-    const size_t newCapacity = NextObjectStateCapacity(objectCount);
-    if (newCapacity <= objectStateCapacity)
+    if (newCapacity < objectStateCapacity)
     {
-        return;
+        std::vector<objectStateCpu> compactedStateData(stateData.begin(), stateData.end());
+        compactedStateData.reserve(newCapacity);
+        stateData.swap(compactedStateData);
+    }
+    else
+    {
+        stateData.reserve(newCapacity);
     }
 
-    sphreStateData.reserve(newCapacity);
-
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity * sizeof(SphreStateCpu), nullptr,
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity * sizeof(objectStateCpu), nullptr,
                  GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -286,13 +308,13 @@ void UploadObjectState(size_t objectCount)
         return;
     }
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, objectCount * sizeof(SphreStateCpu),
-                    sphreStateData.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, objectCount * sizeof(objectStateCpu),
+                    objectData.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
-void InitializeRenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
+void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     gridNodeCount = gpuGridVertices.size();
@@ -315,38 +337,37 @@ void InitializeRenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
     glBindVertexArray(0);
 }
 
-void InitializeSimulationPipeline(const std::vector<glm::vec4> &gpuGridVertices)
+void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
     // Create the Shader Storage Buffer Object (SSBO) for sphere state data.
-    glGenBuffers(1, &sphreStateSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphreStateSSBO);
-    EnsureObjectStateCapacity(objs.size());
-    sphreStateData.resize(objs.size());
-    // Bind sphreStateSSBO to binding point 0, as specified in the compute shader.
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sphreStateSSBO);
+    glGenBuffers(1, &objectDataSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
+    ManageObjectStateBufferCapacity(objectData, objs.size());
+    // Bind objectDataSSBO: binding point 0
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectDataSSBO);
 
-    // Create the Shader Storage Buffer Object (SSBO) for the base grid positions readonly buffer.
+    // Create SSBO for the base grid positions readonly buffer.
     glGenBuffers(1, &baseGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseGridSSBO);
     glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4),
                  gpuGridVertices.data(), GL_STATIC_DRAW);
-    // Bind baseGridSSBO correctly to binding point 1, as specified in the compute shader.
+    // Bind baseGridSSBO: binding point 1
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseGridSSBO);
 
     glGenBuffers(1, &deformedGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, deformedGridSSBO);
     glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4), nullptr,
                  GL_DYNAMIC_DRAW);
+    // Bind deformedGridSSBO: binding point 2
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, deformedGridSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    // binding 0: sphreStateSSBO, binding 1: baseGridSSBO, binding 2: deformedGridSSBO
 }
 
-void InitializeGridPipeline()
+void InitializeGpuComputation()
 {
     std::vector<glm::vec4> gpuGridVertices = CreateBaseGridGPU();
-    InitializeRenderingPipeline(gpuGridVertices);
-    InitializeSimulationPipeline(gpuGridVertices);
+    RenderingPipeline(gpuGridVertices);
+    ComputePipeline(gpuGridVertices);
 }
 
 void RunGridCompute(size_t objectCount)
@@ -375,7 +396,7 @@ void RunGridCompute(size_t objectCount)
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
 }
 
-void Cleanup(GLuint shaderProgram)
+void Cleanup(GLuint shaderProgram, GLuint computeProgram)
 {
     for (auto &obj : objs)
     {
@@ -386,11 +407,25 @@ void Cleanup(GLuint shaderProgram)
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteBuffers(1, &gridVBO);
     glDeleteBuffers(1, &gridEBO);
-    glDeleteBuffers(1, &sphreStateSSBO);
+    glDeleteBuffers(1, &objectDataSSBO);
     glDeleteBuffers(1, &baseGridSSBO);
     glDeleteBuffers(1, &deformedGridSSBO);
-    glDeleteProgram(gridComputeProgram);
     glDeleteProgram(shaderProgram);
+    glDeleteProgram(computeProgram);
+
+    objs.clear();
+    objectData.clear();
+    gridVAO = 0;
+    gridVBO = 0;
+    gridEBO = 0;
+    objectDataSSBO = 0;
+    baseGridSSBO = 0;
+    deformedGridSSBO = 0;
+    gridComputeProgram = 0;
+    objectStateCapacity = 0;
+    gridNodeCount = 0;
+    gridIndexCount = 0;
+
     glfwTerminate();
 }
 

@@ -28,11 +28,11 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t v
                        GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
 std::vector<glm::vec4> CreateBaseGridGPU();
-void InitializeRenderingPipeline(const std::vector<glm::vec4> &basePositions);
-void InitializeSimulationPipeline(const std::vector<glm::vec4> &basePositions);
-void InitializeGridPipeline();
+void RenderingPipeline(const std::vector<glm::vec4> &basePositions);
+void ComputePipeline(const std::vector<glm::vec4> &basePositions);
+void InitializeGpuComputation();
 void RunGridCompute(size_t objectCount);
-void Cleanup(GLuint shaderProgram);
+void Cleanup(GLuint shaderProgram, GLuint computeProgram);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
 void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
@@ -50,30 +50,29 @@ std::vector<unsigned int> CreateGridIndices(int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
 std::vector<Object> CreateObjects(const std::string &objectFilePath = {},
                                   int randomObjectCount = 0);
-size_t NextObjectStateCapacity(size_t requiredCount);
-void EnsureObjectStateCapacity(size_t objectCount);
-void UploadObjectState(size_t objectCount);
-
 class Object
 {
   public:
+    // Rendering state
     GLuint VAO, VBO;
+    glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+    size_t vertexCount;
+    // Simulation state
     glm::vec3 position = glm::vec3(400, 300, 0);
     glm::vec3 velocity = glm::vec3(0, 0, 0);
-    size_t vertexCount;
-    glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-
+    // Interaction state
     bool initializing = false;
     bool launched = false;
     bool target = false;
-
+    // Physical parameter
     float mass;
     float density;
+    // Derived state
     float radius;
     float rs;
-
+    // Auxiliary state
     glm::vec3 lastPos = position;
-
+    // Constructor
     Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass, float density = 3344)
     {
         this->position = initPosition;
@@ -87,7 +86,6 @@ class Object
         vertexCount = vertices.size();
         CreateMeshBuffers(VAO, VBO, vertices.data(), vertexCount);
     }
-
     std::vector<float> DrawSphereMesh()
     {
         std::vector<float> vertices;
@@ -115,7 +113,6 @@ class Object
         }
         return vertices;
     }
-
     void UpdatePosition()
     {
         this->position[0] += this->velocity[0] / 94;
@@ -124,7 +121,6 @@ class Object
         this->radius =
             pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
-
     void UpdateVertexBuffer()
     {
         std::vector<float> vertices = DrawSphereMesh();
@@ -156,16 +152,20 @@ class Object
     }
 };
 
-struct SphreStateCpu
+struct objectStateCpu
 {
     glm::vec4 position_mass;
     glm::vec4 velocity_radius;
 };
 
-static_assert(sizeof(SphreStateCpu) == 2 * sizeof(glm::vec4),
-              "SphreStateCpu must be a vec4 pair for std430 compatibility.");
-static_assert(alignof(SphreStateCpu) == alignof(glm::vec4),
-              "SphreStateCpu must respect vec4 alignment.");
+static_assert(sizeof(objectStateCpu) == 2 * sizeof(glm::vec4),
+              "objectStateCpu must be a vec4 pair for std430 compatibility.");
+static_assert(alignof(objectStateCpu) == alignof(glm::vec4),
+              "objectStateCpu must respect vec4 alignment.");
+
+size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
+void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, size_t objectCount);
+void UploadObjectState(size_t objectCount);
 
 extern bool running;
 extern bool pause;
@@ -188,11 +188,11 @@ extern std::vector<Object> objs;
 extern GLuint gridVAO;
 extern GLuint gridVBO;
 extern GLuint gridEBO;
-extern GLuint sphreStateSSBO;
+extern GLuint objectDataSSBO;
 extern GLuint gridComputeProgram;
 extern GLuint baseGridSSBO;
 extern GLuint deformedGridSSBO;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
-extern std::vector<SphreStateCpu> sphreStateData;
+extern std::vector<objectStateCpu> objectData;
 extern size_t objectStateCapacity;

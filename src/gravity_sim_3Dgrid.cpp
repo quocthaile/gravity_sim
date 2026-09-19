@@ -30,31 +30,32 @@ std::vector<Object> objs = {};
 GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-GLuint sphreStateSSBO;
+GLuint objectDataSSBO;
 GLuint gridComputeProgram;
 GLuint baseGridSSBO = 0;
 GLuint deformedGridSSBO = 0;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
-std::vector<SphreStateCpu> sphreStateData;
+std::vector<objectStateCpu> objectData;
 size_t objectStateCapacity = 0;
 
 int main()
 {
-    // Initialize GLFW, create a window, and set up OpenGL context.
-    GLFWwindow *window = StartGLU();
-    InitializeGlfwCallbacks(window);
-
+    // Initialize OpenGL resources.
     GLuint shaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
-    InitializeRenderingResources(shaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
+    // Initialize GLFW, create a window, and set up OpenGL context.
+    GLFWwindow *window = StartGLU();
+    InitializeGlfwCallbacks(window);
     // Pass a file path here to load objects from CSV instead of using defaults.
     objs = CreateObjects({}, numRandomObjects);
     size_t objectCount = objs.size();
+    // Set up rendering resources, including shaders and camera position.
+    InitializeRenderingResources(shaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
     // Initialize the grid pipeline for GPU computation.
-    InitializeGridPipeline();
+    InitializeGpuComputation();
     // Main render loop: update object states, run compute shader, and render scene.
     while (!glfwWindowShouldClose(window) && running == true)
     {
@@ -66,6 +67,7 @@ int main()
         BeginFrame();
         UpdateCamera(shaderProgram, viewLoc, cameraPos);
         UpdateInitializingObject(window);
+
         // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
         for (auto &obj : objs)
@@ -113,21 +115,23 @@ int main()
         }
 
         // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
-        glUseProgram(shaderProgram);
-        objectCount = objs.size();
-        EnsureObjectStateCapacity(objectCount);
-        sphreStateData.resize(objectCount);
-
+        size_t checkObjectCount = objs.size();
+        if (checkObjectCount != objectCount)
+        {
+            objectCount = checkObjectCount;
+            ManageObjectStateBufferCapacity(objectData, objectCount);
+        }
+        // Update the object data with the current positions, velocities, and masses of all objects.
         for (size_t i = 0; i < objectCount; ++i)
         {
-            sphreStateData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
-            sphreStateData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
+            objectData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
+            objectData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
         }
-
+        // Upload the object state data to the GPU for use in the compute shader.
         UploadObjectState(objectCount);
         // Run the compute shader to update the grid based on the current state of the objects.
         RunGridCompute(objectCount);
-
+        // Render the deformed grid and all objects in the scene.
         DrawGrid(shaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
         DrawObjects(objs, modelLoc, objectColorLoc);
@@ -136,6 +140,6 @@ int main()
         glfwPollEvents();
     } // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
-    Cleanup(shaderProgram);
+    Cleanup(shaderProgram, gridComputeProgram);
     return 0;
 }
