@@ -31,7 +31,7 @@ GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
 GLuint objectDataSSBO;
-GLuint gridComputeProgram;
+GLuint gridComputeShaderProgram;
 GLuint baseGridSSBO = 0;
 GLuint deformedGridSSBO = 0;
 size_t gridNodeCount = 0;
@@ -42,7 +42,7 @@ size_t objectStateCapacity = 0;
 int main()
 {
     // Initialize OpenGL resources.
-    GLuint shaderProgram = 0;
+    GLuint renderingShaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
@@ -53,7 +53,8 @@ int main()
     objs = CreateObjects({}, numRandomObjects);
     size_t objectCount = objs.size();
     // Set up rendering resources, including shaders and camera position.
-    InitializeRenderingResources(shaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
+    InitializeRenderingResources(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc,
+                                 cameraPos);
     // Initialize the grid pipeline for GPU computation.
     InitializeGpuComputation();
     // Main render loop: update object states, run compute shader, and render scene.
@@ -65,7 +66,7 @@ int main()
         lastFrame = currentFrame;
 
         BeginFrame();
-        UpdateCamera(shaderProgram, viewLoc, cameraPos);
+        UpdateCamera(renderingShaderProgram, viewLoc, cameraPos);
         UpdateInitializingObject(window);
 
         // N-body gravitational interactions between all objects in the simulation.
@@ -130,9 +131,9 @@ int main()
         // Upload the object state data to the GPU for use in the compute shader.
         UploadObjectState(objectCount);
         // Run the compute shader to update the grid based on the current state of the objects.
-        RunGridCompute(objectCount);
+        RunGridCompute(gridComputeShaderProgram, objectCount);
         // Render the deformed grid and all objects in the scene.
-        DrawGrid(shaderProgram, gridVAO, gridIndexCount, objectColorLoc);
+        DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
         DrawObjects(objs, modelLoc, objectColorLoc);
         // Swap buffers and poll for events.
@@ -140,6 +141,6 @@ int main()
         glfwPollEvents();
     } // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
-    Cleanup(shaderProgram, gridComputeProgram);
+    Cleanup(renderingShaderProgram, gridComputeShaderProgram);
     return 0;
 }

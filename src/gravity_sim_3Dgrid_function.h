@@ -19,7 +19,7 @@ class Object;
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
-void InitializeRenderingResources(GLuint &shaderProgram, GLint &modelLocation,
+void InitializeRenderingResources(GLuint &renderingShaderProgram, GLint &modelLocation,
                                   GLint &objectColorLocation, GLint &viewLocation,
                                   glm::vec3 &cameraPosition);
 GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
@@ -31,18 +31,19 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void RenderingPipeline(const std::vector<glm::vec4> &basePositions);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void InitializeGpuComputation();
-void RunGridCompute(size_t objectCount);
-void Cleanup(GLuint shaderProgram, GLuint computeProgram);
+void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
+void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
-void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
+void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
 void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods);
 void MouseCallback(GLFWwindow *window, double xPosition, double yPosition);
 void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
 void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset);
 void InitializeGlfwCallbacks(GLFWwindow *window);
 glm::vec3 SphericalToCartesian(float radius, float theta, float phi);
-void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount, GLint objectColorLocation);
+void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
+              GLint objectColorLocation);
 void DrawObjects(const std::vector<Object> &objects, GLint modelLocation,
                  GLint objectColorLocation);
 std::vector<float> CreateGridVertices(float size, int divisions);
@@ -189,7 +190,7 @@ extern GLuint gridVAO;
 extern GLuint gridVBO;
 extern GLuint gridEBO;
 extern GLuint objectDataSSBO;
-extern GLuint gridComputeProgram;
+extern GLuint gridComputeShaderProgram;
 extern GLuint baseGridSSBO;
 extern GLuint deformedGridSSBO;
 extern size_t gridNodeCount;

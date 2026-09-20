@@ -15,24 +15,25 @@ std::string LoadShaderSource(const std::string &filePath)
                        std::istreambuf_iterator<char>());
 }
 
-void InitializeRenderingResources(GLuint &shaderProgram, GLint &modelLocation,
+void InitializeRenderingResources(GLuint &renderingShaderProgram, GLint &modelLocation,
                                   GLint &objectColorLocation, GLint &viewLocation,
                                   glm::vec3 &cameraPosition)
 {
     std::string vertexShaderSource = LoadShaderSource("shaders/grid.vert");
     std::string fragmentShaderSource = LoadShaderSource("shaders/grid.frag");
     std::string computeShaderSource = LoadShaderSource("shaders/grid.comp");
-    shaderProgram = CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
-    gridComputeProgram = CreateComputeProgram(computeShaderSource.c_str());
+    renderingShaderProgram =
+        CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
+    gridComputeShaderProgram = CreateComputeProgram(computeShaderSource.c_str());
 
-    modelLocation = glGetUniformLocation(shaderProgram, "model");
-    objectColorLocation = glGetUniformLocation(shaderProgram, "objectColor");
-    viewLocation = glGetUniformLocation(shaderProgram, "view");
-    glUseProgram(shaderProgram);
+    modelLocation = glGetUniformLocation(renderingShaderProgram, "model");
+    objectColorLocation = glGetUniformLocation(renderingShaderProgram, "objectColor");
+    viewLocation = glGetUniformLocation(renderingShaderProgram, "view");
+    glUseProgram(renderingShaderProgram);
 
     glm::mat4 projection =
         glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
-    GLint projectionLocation = glGetUniformLocation(shaderProgram, "projection");
+    GLint projectionLocation = glGetUniformLocation(renderingShaderProgram, "projection");
     glUniformMatrix4fv(projectionLocation, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPosition = glm::vec3(0.0f, 1000.0f, 5000.0f);
 }
@@ -152,23 +153,23 @@ GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
         std::cerr << "Fragment shader compilation failed: " << infoLog << std::endl;
     }
 
-    GLuint shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
+    GLuint renderingShaderProgram = glCreateProgram();
+    glAttachShader(renderingShaderProgram, vertexShader);
+    glAttachShader(renderingShaderProgram, fragmentShader);
+    glLinkProgram(renderingShaderProgram);
 
-    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    glGetProgramiv(renderingShaderProgram, GL_LINK_STATUS, &success);
     if (!success)
     {
         char infoLog[512];
-        glGetProgramInfoLog(shaderProgram, 512, nullptr, infoLog);
+        glGetProgramInfoLog(renderingShaderProgram, 512, nullptr, infoLog);
         std::cerr << "Shader program linking failed: " << infoLog << std::endl;
     }
 
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
 
-    return shaderProgram;
+    return renderingShaderProgram;
 }
 
 GLuint CreateComputeProgram(const char *computeSource)
@@ -186,20 +187,20 @@ GLuint CreateComputeProgram(const char *computeSource)
         std::cerr << "Compute shader compilation failed: " << infoLog << std::endl;
     }
 
-    GLuint computeProgram = glCreateProgram();
-    glAttachShader(computeProgram, computeShader);
-    glLinkProgram(computeProgram);
+    GLuint computeShaderProgram = glCreateProgram();
+    glAttachShader(computeShaderProgram, computeShader);
+    glLinkProgram(computeShaderProgram);
 
-    glGetProgramiv(computeProgram, GL_LINK_STATUS, &success);
+    glGetProgramiv(computeShaderProgram, GL_LINK_STATUS, &success);
     if (!success)
     {
         char infoLog[512];
-        glGetProgramInfoLog(computeProgram, 512, nullptr, infoLog);
+        glGetProgramInfoLog(computeShaderProgram, 512, nullptr, infoLog);
         std::cerr << "Compute program linking failed: " << infoLog << std::endl;
     }
 
     glDeleteShader(computeShader);
-    return computeProgram;
+    return computeShaderProgram;
 }
 
 void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount,
@@ -370,18 +371,19 @@ void InitializeGpuComputation()
     ComputePipeline(gpuGridVertices);
 }
 
-void RunGridCompute(size_t objectCount)
+void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
 {
-    glUseProgram(gridComputeProgram);
-    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_objectCount"),
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
                  static_cast<GLuint>(objectCount));
     const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
     const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
-    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridWidth"), gridWidth);
-    glUniform1ui(glGetUniformLocation(gridComputeProgram, "u_gridHeight"), gridHeight);
-
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridWidth"), gridWidth);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridHeight"), gridHeight);
+    // Round up work group counts
     const GLuint groupCountX = (gridWidth + kGridLocalSizeX - 1) / kGridLocalSizeX;
     const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;
+    // Dispatch the compute shader with the calculated number of work groups.
     glDispatchCompute(groupCountX, groupCountY, 1);
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -396,7 +398,7 @@ void RunGridCompute(size_t objectCount)
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
 }
 
-void Cleanup(GLuint shaderProgram, GLuint computeProgram)
+void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
 {
     for (auto &obj : objs)
     {
@@ -410,8 +412,8 @@ void Cleanup(GLuint shaderProgram, GLuint computeProgram)
     glDeleteBuffers(1, &objectDataSSBO);
     glDeleteBuffers(1, &baseGridSSBO);
     glDeleteBuffers(1, &deformedGridSSBO);
-    glDeleteProgram(shaderProgram);
-    glDeleteProgram(computeProgram);
+    glDeleteProgram(renderingShaderProgram);
+    glDeleteProgram(computeShaderProgram);
 
     objs.clear();
     objectData.clear();
@@ -421,7 +423,7 @@ void Cleanup(GLuint shaderProgram, GLuint computeProgram)
     objectDataSSBO = 0;
     baseGridSSBO = 0;
     deformedGridSSBO = 0;
-    gridComputeProgram = 0;
+    gridComputeShaderProgram = 0;
     objectStateCapacity = 0;
     gridNodeCount = 0;
     gridIndexCount = 0;
@@ -450,9 +452,9 @@ void UpdateInitializingObject(GLFWwindow *window)
     }
 }
 
-void UpdateCamera(GLuint shaderProgram, GLint viewLocation, glm::vec3 cameraPosition)
+void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition)
 {
-    glUseProgram(shaderProgram);
+    glUseProgram(renderingShaderProgram);
     glm::mat4 view = glm::lookAt(cameraPosition, cameraPosition + cameraFront, cameraUp);
     glUniformMatrix4fv(viewLocation, 1, GL_FALSE, glm::value_ptr(view));
 }
@@ -595,12 +597,13 @@ glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
     return glm::vec3(x, y, z);
 }
 
-void DrawGrid(GLuint shaderProgram, GLuint gridVAO, size_t indexCount, GLint objectColorLocation)
+void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
+              GLint objectColorLocation)
 {
-    glUseProgram(shaderProgram);
+    glUseProgram(renderingShaderProgram);
     glUniform4f(objectColorLocation, 1.0f, 1.0f, 1.0f, 0.25f);
     glm::mat4 model = glm::mat4(1.0f);
-    GLint modelLoc = glGetUniformLocation(shaderProgram, "model");
+    GLint modelLoc = glGetUniformLocation(renderingShaderProgram, "model");
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
     glBindVertexArray(gridVAO);
     // glPointSize(5.0f);
