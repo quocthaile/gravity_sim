@@ -18,7 +18,7 @@ The upload and compute stages use only the first `objectCount` records. Unused c
 
 ## 2. CPU representation
 
-The CPU-side record is defined in `src/gravity_sim_3Dgrid_function.h`:
+The CPU-side record is defined in `include/gravity_sim_3Dgrid_function.hpp`:
 
 ```cpp
 struct SphreStateCpu

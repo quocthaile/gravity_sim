@@ -1,4 +1,4 @@
-#include "gravity_sim_3Dgrid_function.h"
+#include "gravity_sim_3Dgrid_function.hpp"
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
@@ -30,10 +30,8 @@ std::vector<Object> objs = {};
 GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-GLuint objectDataSSBO;
 GLuint gridComputeShaderProgram;
-GLuint baseGridSSBO = 0;
-GLuint deformedGridSSBO = 0;
+GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
 std::vector<objectStateCpu> objectData;
@@ -83,20 +81,16 @@ int main()
                     float distance = sqrt(dx * dx + dy * dy + dz * dz);
                     if (distance > 0)
                     {
-                        std::vector<float> direction = {dx / distance, dy / distance,
-                                                        dz / distance};
+                        glm::vec3 direction(dx / distance, dy / distance, dz / distance);
                         distance *= 1000;
                         double gravitationalForce =
                             (kGravitationalConstant * obj.mass * obj2.mass) /
                             (distance * distance + epsilon * epsilon);
                         float acceleration = gravitationalForce / obj.mass;
-                        std::vector<float> accelerationVector = {direction[0] * acceleration,
-                                                                 direction[1] * acceleration,
-                                                                 direction[2] * acceleration};
                         if (!pause)
                         {
-                            obj.Accelerate(accelerationVector[0], accelerationVector[1],
-                                           accelerationVector[2]);
+                            obj.Accelerate(direction.x * acceleration, direction.y * acceleration,
+                                           direction.z * acceleration);
                         }
                         obj.velocity *= obj.CheckCollision(obj2);
                     }

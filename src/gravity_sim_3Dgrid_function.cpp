@@ -1,4 +1,4 @@
-#include "gravity_sim_3Dgrid_function.h"
+#include "gravity_sim_3Dgrid_function.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -294,10 +294,11 @@ void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, siz
         stateData.reserve(newCapacity);
     }
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity * sizeof(objectStateCpu), nullptr,
-                 GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpuMemoryManager.Resize(BufferRole::CurrentState, newCapacity);
+    if (gpuMemoryManager.Contains(BufferRole::NextState))
+    {
+        gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
+    }
 
     objectStateCapacity = newCapacity;
 }
@@ -309,10 +310,8 @@ void UploadObjectState(size_t objectCount)
         return;
     }
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, objectCount * sizeof(objectStateCpu),
-                    objectData.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpuMemoryManager.Upload(BufferRole::CurrentState, objectData.data(),
+                            objectCount * sizeof(objectStateCpu), objectCount);
 }
 
 void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
@@ -340,28 +339,21 @@ void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
 
 void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
-    // Create the Shader Storage Buffer Object (SSBO) for sphere state data.
-    glGenBuffers(1, &objectDataSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, objectDataSSBO);
+    gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
+                             GpuStorageMode::GpuResident, GpuAccess::ReadOnly,
+                             sizeof(objectStateCpu), 0});
     ManageObjectStateBufferCapacity(objectData, objs.size());
-    // Bind objectDataSSBO: binding point 0
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, objectDataSSBO);
-
-    // Create SSBO for the base grid positions readonly buffer.
-    glGenBuffers(1, &baseGridSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseGridSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4),
-                 gpuGridVertices.data(), GL_STATIC_DRAW);
-    // Bind baseGridSSBO: binding point 1
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseGridSSBO);
-
-    glGenBuffers(1, &deformedGridSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, deformedGridSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4), nullptr,
-                 GL_DYNAMIC_DRAW);
-    // Bind deformedGridSSBO: binding point 2
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, deformedGridSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpuMemoryManager.Create({BufferRole::NextState, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
+                             GpuStorageMode::GpuResident, GpuAccess::ReadWrite,
+                             sizeof(objectStateCpu), objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER, GL_STATIC_DRAW,
+                             GpuStorageMode::GpuResident, GpuAccess::ReadOnly, sizeof(glm::vec4),
+                             gpuGridVertices.size()});
+    gpuMemoryManager.Upload(BufferRole::BaseGrid, gpuGridVertices.data(),
+                            gpuGridVertices.size() * sizeof(glm::vec4), gpuGridVertices.size());
+    gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
+                             GpuStorageMode::GpuResident, GpuAccess::WriteOnly, sizeof(glm::vec4),
+                             gpuGridVertices.size()});
 }
 
 void InitializeGpuComputation()
@@ -388,7 +380,7 @@ void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-    glBindBuffer(GL_COPY_READ_BUFFER, deformedGridSSBO);
+    glBindBuffer(GL_COPY_READ_BUFFER, gpuMemoryManager.Get(BufferRole::DeformedGrid).Handle());
     glBindBuffer(GL_COPY_WRITE_BUFFER, gridVBO);
     glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
                         gridNodeCount * sizeof(glm::vec4));
@@ -409,9 +401,7 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteBuffers(1, &gridVBO);
     glDeleteBuffers(1, &gridEBO);
-    glDeleteBuffers(1, &objectDataSSBO);
-    glDeleteBuffers(1, &baseGridSSBO);
-    glDeleteBuffers(1, &deformedGridSSBO);
+    gpuMemoryManager.Shutdown();
     glDeleteProgram(renderingShaderProgram);
     glDeleteProgram(computeShaderProgram);
 
@@ -420,9 +410,6 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
     gridVAO = 0;
     gridVBO = 0;
     gridEBO = 0;
-    objectDataSSBO = 0;
-    baseGridSSBO = 0;
-    deformedGridSSBO = 0;
     gridComputeShaderProgram = 0;
     objectStateCapacity = 0;
     gridNodeCount = 0;

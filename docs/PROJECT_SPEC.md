@@ -64,7 +64,7 @@ Important current files:
 
 ```text
 src/gravity_sim_3Dgrid.cpp
-src/gravity_sim_3Dgrid_function.h
+include/gravity_sim_3Dgrid_function.hpp
 src/gravity_sim_3Dgrid_function.cpp
 shaders/grid.comp
 shaders/grid.vert

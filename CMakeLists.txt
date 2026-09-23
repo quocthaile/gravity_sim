@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -27,7 +27,7 @@ function(add_gravity_executable target)
 
     target_link_libraries(${target} PRIVATE ${GRAVITY_SIM_LIBS})
 
-    target_compile_features(${target} PRIVATE cxx_std_23)
+    target_compile_features(${target} PRIVATE cxx_std_20)
 
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -54,6 +54,7 @@ add_gravity_executable(gravity_sim src/gravity_sim.cpp)
 add_gravity_executable(gravity_sim_3Dgrid
     src/gravity_sim_3Dgrid.cpp
     src/gravity_sim_3Dgrid_function.cpp
+    src/gpu_memory_manager.cpp
     shaders/grid.vert
     shaders/grid.frag
     shaders/grid.comp

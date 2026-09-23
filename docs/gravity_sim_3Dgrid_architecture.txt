@@ -51,7 +51,7 @@ Source files:
         loading, global simulation state definitions, and the main render and
         simulation loop.
 
-    src/gravity_sim_3Dgrid_function.h
+    include/gravity_sim_3Dgrid_function.hpp
         Shared declarations, the Object class, the CPU SSBO data structure,
         constants, and extern declarations for shared state.
 

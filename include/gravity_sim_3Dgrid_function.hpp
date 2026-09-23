@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gpu_memory_manager.hpp"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <array>
@@ -189,10 +190,8 @@ extern std::vector<Object> objs;
 extern GLuint gridVAO;
 extern GLuint gridVBO;
 extern GLuint gridEBO;
-extern GLuint objectDataSSBO;
 extern GLuint gridComputeShaderProgram;
-extern GLuint baseGridSSBO;
-extern GLuint deformedGridSSBO;
+extern GpuMemoryManager gpuMemoryManager;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
 extern std::vector<objectStateCpu> objectData;
