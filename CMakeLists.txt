@@ -70,4 +70,21 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
         $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
 )
 
+add_gravity_executable(gravity_sim_3Dgrid_baseline
+    src/gravity_sim_3Dgrid_baseline.cpp
+    shaders/grid.vert
+    shaders/grid.frag
+    shaders/grid.comp
+)
+
+add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid_baseline>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.vert
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.frag
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid_baseline>/shaders
+)
+
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
