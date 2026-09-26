@@ -5,6 +5,9 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <vector>
 #include <iostream>
+#include <chrono>
+#include <random>'
+#include <fstream>
 
 const char* vertexShaderSource = R"glsl(#version 330 core
 layout(location=0)in vec3 aPos;uniform mat4 model;uniform mat4 view;uniform mat4 projection;
@@ -150,6 +153,101 @@ std::vector<float> CreateGridVertices(float size, int divisions, const std::vect
 
 GLuint gridVAO, gridVBO; // 100x100 grid with 10 divisions
 
+//Tạo random object
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3& center, float centralMass)
+{
+    (void)centralMass;
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
+    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
+    std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
+    std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
+
+    std::vector<Object> generated;
+    generated.reserve(count);
+
+    for (int i = 0; i < count; ++i)
+    {
+        float radius = radiusDist(rng);
+        float angle = angleDist(rng);
+        float tilt = tiltDist(rng);
+        float orbitalSpeed = speedDist(rng);
+
+        glm::vec3 position(center.x + radius * std::cos(angle), center.y + radius * tilt,
+            center.z + radius * std::sin(angle));
+        glm::vec3 velocity(-std::sin(angle) * orbitalSpeed, 0.0f, std::cos(angle) * orbitalSpeed);
+
+        float mass = massDist(rng);
+        generated.emplace_back(position, velocity, mass, 3344.0f);
+        generated.back().color =
+            glm::vec4(0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
+                0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
+                0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
+    }
+
+    return generated;
+}
+
+std::vector<Object> CreateObjects(const std::string& objectFilePath, int randomObjectCount)
+{
+    if (!objectFilePath.empty())
+    {
+        std::ifstream objectFile(objectFilePath);
+        if (!objectFile)
+        {
+            throw std::runtime_error("Unable to open object file: " + objectFilePath);
+        }
+
+        std::vector<Object> loadedObjects;
+        std::string line;
+        size_t lineNumber = 0;
+        while (std::getline(objectFile, line))
+        {
+            ++lineNumber;
+            if (line.empty() || line.front() == '#')
+            {
+                continue;
+            }
+
+            std::stringstream values(line);
+            char separator = 0;
+            float positionX = 0.0f;
+            float positionY = 0.0f;
+            float positionZ = 0.0f;
+            float velocityX = 0.0f;
+            float velocityY = 0.0f;
+            float velocityZ = 0.0f;
+            float mass = 0.0f;
+            float density = 3344.0f;
+
+            if (!(values >> positionX >> separator && separator == ',' &&
+                values >> positionY >> separator && separator == ',' &&
+                values >> positionZ >> separator && separator == ',' &&
+                values >> velocityX >> separator && separator == ',' &&
+                values >> velocityY >> separator && separator == ',' &&
+                values >> velocityZ >> separator && separator == ',' &&
+                values >> mass >> separator && separator == ',' && values >> density))
+            {
+                throw std::runtime_error("Invalid object data at line " +
+                    std::to_string(lineNumber) + " in " + objectFilePath);
+            }
+
+            loadedObjects.emplace_back(glm::vec3(positionX, positionY, positionZ),
+                glm::vec3(velocityX, velocityY, velocityZ), mass, density);
+        }
+        return loadedObjects;
+    }
+
+    std::vector<Object> defaultObjects = {
+        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309e22f, 3344),
+        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219e24f, 5515) };
+    auto randomBodies =
+        CreateRandomOrbiters(randomObjectCount, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    defaultObjects.insert(defaultObjects.end(), randomBodies.begin(), randomBodies.end());
+    return defaultObjects;
+}
+
 
 int main() {
     GLFWwindow* window = StartGLU();
@@ -169,18 +267,31 @@ int main() {
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
     cameraPos = glm::vec3(0.0f, 1000.0f,  5000.0f);
 
-    
-    objs = {
-        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309*pow(10, 22), 3344),
-        // Object(glm::vec3(-250, 0, 0), glm::vec3(0, -50, 0), 7.34767309*pow(10, 22), 3344),
-        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
+    auto startObjTime = std::chrono::high_resolution_clock::now();
+    //objs = {
+    //    Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309*pow(10, 22), 3344),
+    //    // Object(glm::vec3(-250, 0, 0), glm::vec3(0, -50, 0), 7.34767309*pow(10, 22), 3344),
+    //    Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
+    //};
+    objs = CreateObjects({}, 200);
 
-    };
+    auto endObjTime = std::chrono::high_resolution_clock::now();
+    auto objectCreationDuration = std::chrono::duration_cast<std::chrono::milliseconds>(endObjTime - startObjTime);
+    std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
+
+    size_t objectCount = objs.size();
+    std::cout << "Initial object count: " << objectCount << std::endl;
+
     std::vector<float> gridVertices = CreateGridVertices(100000.0f, 50, objs);
     CreateVBOVAO(gridVAO, gridVBO, gridVertices.data(), gridVertices.size());
     std::cout<<"Earth radius: "<<objs[1].radius<<std::endl;
     std::cout<<"Moon radius: "<<objs[0].radius<<std::endl;
 
+    int frameCount = 0;
+    double fps = 0.0;
+    double frameTime = 0.0;
+    std::cout << "Starting main loop..." << std::endl;
+    auto startLoopTime = std::chrono::high_resolution_clock::now();
     while (!glfwWindowShouldClose(window) && running == true) {
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
@@ -211,12 +322,18 @@ int main() {
         // Draw the grid
         glUseProgram(shaderProgram);
         glUniform4f(objectColorLoc, 1.0f, 1.0f, 1.0f, 0.25f); // White color with 50% transparency for the grid
+        auto startGridTime = std::chrono::high_resolution_clock::now();
         gridVertices = CreateGridVertices(10000.0f, 50, objs);
         glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
         glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_DYNAMIC_DRAW);
         DrawGrid(shaderProgram, gridVAO, gridVertices.size());
+        auto endGridTime = std::chrono::high_resolution_clock::now();
+        std::cout << "Grid rendering time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime).count()
+            << " ms" << std::endl;
 
         // Draw the triangle
+        auto startNBodyTime = std::chrono::high_resolution_clock::now();
         for(auto& obj : objs) {
             glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 
@@ -260,9 +377,27 @@ int main() {
             glBindVertexArray(obj.VAO);
             glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
         }
+
+		auto endNBodyTime = std::chrono::high_resolution_clock::now();
+		std::cout << "N-body computation time: "
+			<< std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime - startNBodyTime).count()
+			<< " ms" << std::endl;
         
         glfwSwapBuffers(window);
         glfwPollEvents();
+
+        frameCount++;
+        auto CurrentFrameTime = std::chrono::high_resolution_clock::now();
+        auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(CurrentFrameTime - startLoopTime);
+        if (frameDuration.count() >= 1000.0)
+        {
+            fps = frameCount / (frameDuration.count() / 1000.0);
+            frameTime = 1.0 / fps;
+            std::cout << "Initial object count: " << objectCount << std::endl;
+            std::cout << "FPS: " << fps << std::endl << "Frame Time: " << frameTime << " s" << std::endl;
+            startLoopTime = CurrentFrameTime;
+            frameCount = 0;
+        }
     }
 
     for (auto& obj : objs) {

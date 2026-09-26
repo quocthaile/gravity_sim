@@ -1,4 +1,5 @@
 #include "gravity_sim_3Dgrid_function.hpp"
+#include <chrono>
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
@@ -48,14 +49,30 @@ int main()
     GLFWwindow *window = StartGLU();
     InitializeGlfwCallbacks(window);
     // Pass a file path here to load objects from CSV instead of using defaults.
+    auto startTime = std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
+    auto endObjectTime = std::chrono::high_resolution_clock::now();
+    auto objectCreationDuration = std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
+    std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
     size_t objectCount = objs.size();
+	std::cout << "Initial object count: " << objectCount << std::endl;
     // Set up rendering resources, including shaders and camera position.
     InitializeRenderingResources(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc,
                                  cameraPos);
     // Initialize the grid pipeline for GPU computation.
+    auto startGridTime = std::chrono::high_resolution_clock::now();
     InitializeGpuComputation();
+	auto endGridTime = std::chrono::high_resolution_clock::now();
+	std::cout << "Grid initialization time: "
+		<< std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime).count()
+		<< " ms" << std::endl;
     // Main render loop: update object states, run compute shader, and render scene.
+    
+    int frameCount = 0;
+    double fps = 0.0;
+    double frameTime = 0.0;
+    std::cout << "Starting main loop..." << std::endl;
+    auto startLoopTime = std::chrono::high_resolution_clock::now();
     while (!glfwWindowShouldClose(window) && running == true)
     {
         // Calculate delta time for smooth motion and physics updates.
@@ -69,6 +86,7 @@ int main()
 
         // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
+        auto startNBodyTime = std::chrono::high_resolution_clock::now();
         for (auto &obj : objs)
         {
             for (auto &obj2 : objs)
@@ -109,6 +127,9 @@ int main()
             }
         }
 
+		auto endNBodyTime = std::chrono::high_resolution_clock::now();
+		std::cout << "N-body computation time: " << std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime - startNBodyTime).count() << " ms" << std::endl;
+
         // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
@@ -133,6 +154,19 @@ int main()
         // Swap buffers and poll for events.
         glfwSwapBuffers(window);
         glfwPollEvents();
+
+        frameCount++;
+        auto CurrentFrameTime = std::chrono::high_resolution_clock::now();
+        auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(CurrentFrameTime - startLoopTime);
+        if (frameDuration.count() >= 1000.0)
+        {
+            fps = frameCount / (frameDuration.count() / 1000.0);
+            frameTime = 1.0 / fps;
+            std::cout << "Initial object count: " << objectCount << std::endl;
+            std::cout << "FPS: " << fps << std::endl << "Frame Time: " << frameTime << " s" << std::endl;
+            startLoopTime = CurrentFrameTime;
+            frameCount = 0;
+        }
     } // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
     Cleanup(renderingShaderProgram, gridComputeShaderProgram);
