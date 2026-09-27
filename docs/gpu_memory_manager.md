@@ -1,68 +1,55 @@
-# GPU Memory Manager v1
+# GPU Memory Manager
 
-This document describes the resource layer introduced for the OpenGL 4.3 compute path. It does not implement mass accumulation, blur, LOD, or GPU integration.
+The grid path requires an OpenGL 4.4 core context. `StartGLU` requests OpenGL 4.4, validates `GLEW_VERSION_4_4`, and prints the actual driver version before immutable buffer storage is used.
 
-## Contract
+## Resource model
 
-The buffer roles and binding points are defined once in `include/gpu_memory_manager.hpp` by `BufferRole` and `BindingFor`.
+`BufferRole` is the semantic identity and the sole C++ source for binding numbers through `BindingFor`. `GpuMemoryManager` owns `GpuBuffer` instances and performs lookup, lifecycle, and application-visible accounting. A `GpuBuffer` owns its OpenGL buffer handle, immutable storage, capacity, logical count, and, where configured, its CPU mapping.
 
-| Role | Binding | Current owner | Access in this phase | Storage |
-| --- | ---: | --- | --- | --- |
-| `CurrentState` | 0 | CPU authoritative state mirrored to GPU | compute read | GPU resident |
-| `NextState` | 1 | Reserved for future GPU integration | reserved | GPU resident |
-| `ObjectPhysical` | 2 | Reserved | reserved | GPU resident |
-| `ObjectControl` | 3 | Reserved | reserved | GPU resident |
-| `BaseGrid` | 4 | Static grid input | compute read | GPU resident |
-| `DeformedGrid` | 5 | Grid compute output | compute write | GPU resident |
-| `MassField` | 6 | Reserved | reserved | GPU resident |
-| `BlurFieldA` | 7 | Reserved | reserved | GPU resident |
-| `BlurFieldB` | 8 | Reserved | reserved | GPU resident |
-| `AccelerationField` | 9 | Reserved | reserved | GPU resident |
-| `LODMetadata` | 10 | Reserved | reserved | GPU resident |
-| `Metrics` | 11 | Reserved | reserved | GPU resident |
+GPU-resident means an OpenGL buffer has immutable storage allocated with `glBufferStorage`. Persistent-mapped is a stricter subset: a GPU-resident buffer also has one `glMapBufferRange` mapping, retained as `mappedPtr` until resize, reset, or destruction. The pointer is a CPU virtual address for that buffer storage; it is not a GPU address, OpenGL handle, or `Object *`.
 
-Bindings `12-15` remain reserved. The current object element is unchanged:
+| Role | Binding | Mapping policy | Current use |
+| --- | ---: | --- | --- |
+| `CurrentState` | 0 | Persistent coherent CPU write | Current position and velocity consumed by `grid.comp` |
+| `NextState` | 1 | GPU-only | Reserved for future state ping-pong |
+| `ObjectPhysical` | 2 | Persistent coherent CPU write | Mass and density |
+| `ObjectControl` | 3 | Persistent coherent CPU write | Initializing, launched, and target flags |
+| `BaseGrid` | 4 | GPU-only | Static grid input |
+| `DeformedGrid` | 5 | GPU-only | Grid compute output |
+| `MassField` | 6 | GPU-only | Reserved |
+| `BlurFieldA` | 7 | GPU-only | Reserved |
+| `BlurFieldB` | 8 | GPU-only | Reserved |
+| `AccelerationField` | 9 | GPU-only | Reserved |
+| `LODMetadata` | 10 | GPU-only | Reserved |
+| `Metrics` | 11 | GPU-only | Reserved |
+| `ObjectDerived` | 12 | Persistent coherent CPU write | Radius and Schwarzschild radius |
+| `ObjectAcceleration` | 13 | GPU-only | Reserved for future GPU computation |
+
+Bindings 14 and 15 remain reserved. The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, and `GpuObjectAcceleration` structures. Rendering state such as VAOs, VBOs, color, and vertex count stays in `Object` and is not part of simulation SSBO data.
+
+## CPU to GPU path
+
+CPU `Object` instances remain authoritative. After the unchanged CPU Direct N-body, collision, and integration work, the CPU writes selected buffers through typed mappings:
 
 ```cpp
-struct objectStateCpu {
-    glm::vec4 position_mass;
-    glm::vec4 velocity_radius;
-};
+auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+state[index].position = glm::vec4(object.GetPosition(), 0.0f);
 ```
 
-It is 32 bytes and is consumed by GLSL as two `vec4` values in `std430` layout.
+The runtime also writes physical, derived, and control data to their dedicated mappings. There is no temporary object-state upload array and no per-frame map/unmap cycle. `GpuBuffer::Upload` remains available for GPU-only initialization uploads such as `BaseGrid`.
 
-## Ownership and lifecycle
+## Synchronization and resizing
 
-`GpuMemoryManager` owns `GpuBuffer` instances. `GpuBuffer` owns one OpenGL buffer handle and is move-only. The manager is responsible for create, resize, upload, binding, destruction, and shutdown. Physics code does not call `glGenBuffers`, `glBufferData`, or `glDeleteBuffers` for simulation buffers.
+Coherent mapping provides CPU/GPU visibility for the selected CPU-write buffers. It does not grant simultaneous ownership of a region. `GpuSynchronization` inserts a `GLsync` fence after the grid GPU work. Before the CPU writes mapped object storage again, `WaitForCpuWrite` first performs a non-blocking readiness query and only waits if the GPU has not completed. This avoids CPU writes while the compute dispatch may still read the protected data. GPU-to-CPU consumption is not currently needed; a future reader must wait for its producer fence before reading mapped bytes.
 
-The current pipeline is:
+`glBufferStorage` is immutable. A capacity change creates a replacement `GpuBuffer`, establishes a replacement mapping when needed, preserves logical contents with a GPU copy, rebinds the semantic role, then releases the old resource. The old mapping is explicitly unmapped during replacement/reset/destruction.
 
-```mermaid
-flowchart LR
-    CPU[CPU Object State] --> CS[CurrentState binding 0]
-    CS --> GRID[grid.comp]
-    BASE[BaseGrid binding 4] --> GRID
-    GRID --> DG[DeformedGrid binding 5]
-    DG --> VBO[Grid vertex buffer]
-    NS[NextState binding 1\nreserved]
-```
-
-`CurrentState` and `NextState` have the same element schema. They are separate buffers for future ping-pong integration; this phase does not copy or use `NextState` each frame.
-
-## Accounting
-
-For every buffer:
-
-- logical bytes = logical element count x element size
-- allocated bytes = capacity x element size
-
-The manager additionally tracks peak allocated bytes, allocation count, and reallocation count. These values describe application-visible OpenGL buffer allocations, not physical VRAM residency. Persistent mapping is not enabled because the active context is OpenGL 4.3.
-
-## Synchronization
-
-`grid.comp` writes `DeformedGrid`. The existing `GL_SHADER_STORAGE_BARRIER_BIT` remains before the GPU-to-GPU copy into the rendering VBO, followed by `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT` before rendering. No global barrier or persistent mapping was added.
+The existing `GL_SHADER_STORAGE_BARRIER_BIT` remains scoped to `DeformedGrid` shader writes before copying into the grid VBO. `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT` remains scoped to the subsequent rendering dependency. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
 
 ## Scope boundary
 
-The CPU Direct N-body loop, collision behavior, CPU integration, and grid deformation equation remain the reference behavior. The current compute shader is still an `O(GN)` grid deformation pass; it is not Mass Accumulation.
+This layer does not migrate physics. CPU Direct N-body, collision, integration, timestep behavior, and the grid deformation equation remain unchanged. `grid.comp` is still the existing grid-deformation consumer, not a N-body, mass accumulation, field, blur, or integration compute pass.
+
+## Accounting
+
+Logical bytes, allocated bytes, peak allocated bytes, allocation count, and reallocation count refer to application-visible OpenGL resources, not physical VRAM residency. `MappedBufferCount` and `PersistentMappedBytes` report the subset with retained CPU mappings.

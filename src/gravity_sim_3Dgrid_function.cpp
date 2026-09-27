@@ -95,9 +95,9 @@ GLFWwindow *StartGLU()
         std::cout << "Failed to initialize GLFW." << std::endl;
         return nullptr;
     }
-    // Set the OpenGL version to 4.3 and use the core profile.
+    // Request OpenGL 4.4 core for immutable buffer storage and persistent mapping.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     // Create a window with the specified dimensions and title.
     GLFWwindow *window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
@@ -116,7 +116,15 @@ GLFWwindow *StartGLU()
         glfwTerminate();
         return nullptr;
     }
-    // Print the OpenGL version and compute limits for debugging purposes.
+    if (!GLEW_VERSION_4_4)
+    {
+        std::cerr << "OpenGL 4.4 is required for persistent mapped buffer storage." << std::endl;
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return nullptr;
+    }
+    std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
+    // Print compute limits for debugging purposes.
     PrintComputeLimits();
     // Enable depth testing and set the viewport dimensions.
     glEnable(GL_DEPTH_TEST);
@@ -258,7 +266,7 @@ size_t CalculateObjectStateBufferCapacity(size_t requiredCount)
     return capacity;
 }
 
-void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, size_t objectCount)
+void ManageObjectStateBufferCapacity(size_t objectCount)
 {
     constexpr size_t kMinimumObjectStateCapacity = 256;
     size_t newCapacity = objectStateCapacity;
@@ -277,41 +285,50 @@ void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, siz
         }
     }
 
-    stateData.resize(objectCount);
     if (newCapacity == objectStateCapacity)
     {
         return;
     }
 
-    if (newCapacity < objectStateCapacity)
-    {
-        std::vector<objectStateCpu> compactedStateData(stateData.begin(), stateData.end());
-        compactedStateData.reserve(newCapacity);
-        stateData.swap(compactedStateData);
-    }
-    else
-    {
-        stateData.reserve(newCapacity);
-    }
-
+    gpuMemoryManager.WaitForCpuWrite();
     gpuMemoryManager.Resize(BufferRole::CurrentState, newCapacity);
-    if (gpuMemoryManager.Contains(BufferRole::NextState))
-    {
-        gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
-    }
+    gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectPhysical, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectDerived, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectControl, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectAcceleration, newCapacity);
 
     objectStateCapacity = newCapacity;
 }
 
 void UploadObjectState(size_t objectCount)
 {
-    if (objectCount == 0)
+    gpuMemoryManager.WaitForCpuWrite();
+    auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    auto *physical =
+        gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+    auto *derived = gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+    auto *control = gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    if (state == nullptr || physical == nullptr || derived == nullptr || control == nullptr)
     {
-        return;
+        throw std::runtime_error("CPU-facing object buffers must be persistently mapped");
     }
 
-    gpuMemoryManager.Upload(BufferRole::CurrentState, objectData.data(),
-                            objectCount * sizeof(objectStateCpu), objectCount);
+    for (size_t i = 0; i < objectCount; ++i)
+    {
+        const Object &object = objs[i];
+        state[i] = {glm::vec4(object.GetPosition(), 0.0f), glm::vec4(object.velocity, 0.0f)};
+        physical[i] = {glm::vec4(object.mass, object.density, 0.0f, 0.0f)};
+        derived[i] = {glm::vec4(object.radius, object.rs, 0.0f, 0.0f)};
+        control[i] = {static_cast<std::uint32_t>(object.initializing),
+                      static_cast<std::uint32_t>(object.launched),
+                      static_cast<std::uint32_t>(object.target), 0};
+    }
+
+    gpuMemoryManager.Get(BufferRole::CurrentState).SetLogicalCount(objectCount);
+    gpuMemoryManager.Get(BufferRole::ObjectPhysical).SetLogicalCount(objectCount);
+    gpuMemoryManager.Get(BufferRole::ObjectDerived).SetLogicalCount(objectCount);
+    gpuMemoryManager.Get(BufferRole::ObjectControl).SetLogicalCount(objectCount);
 }
 
 void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
@@ -339,21 +356,42 @@ void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
 
 void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
 {
-    gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
-                             GpuStorageMode::GpuResident, GpuAccess::ReadOnly,
-                             sizeof(objectStateCpu), 0});
-    ManageObjectStateBufferCapacity(objectData, objs.size());
-    gpuMemoryManager.Create({BufferRole::NextState, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
-                             GpuStorageMode::GpuResident, GpuAccess::ReadWrite,
-                             sizeof(objectStateCpu), objectStateCapacity});
-    gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER, GL_STATIC_DRAW,
-                             GpuStorageMode::GpuResident, GpuAccess::ReadOnly, sizeof(glm::vec4),
-                             gpuGridVertices.size()});
+    objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
+    if (objectStateCapacity == 0)
+    {
+        objectStateCapacity = 256;
+    }
+
+    gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectState),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::NextState, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuObjectState), objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectPhysical, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectPhysical),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectDerived, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectDerived),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectControl, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectControl),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectAcceleration, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuObjectAcceleration), objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(glm::vec4), gpuGridVertices.size()});
     gpuMemoryManager.Upload(BufferRole::BaseGrid, gpuGridVertices.data(),
                             gpuGridVertices.size() * sizeof(glm::vec4), gpuGridVertices.size());
-    gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER, GL_DYNAMIC_DRAW,
-                             GpuStorageMode::GpuResident, GpuAccess::WriteOnly, sizeof(glm::vec4),
-                             gpuGridVertices.size()});
+    gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(glm::vec4), gpuGridVertices.size()});
 }
 
 void InitializeGpuComputation()
@@ -388,6 +426,7 @@ void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+    gpuMemoryManager.FenceGpuCompletion();
 }
 
 void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
@@ -406,7 +445,6 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
     glDeleteProgram(computeShaderProgram);
 
     objs.clear();
-    objectData.clear();
     gridVAO = 0;
     gridVBO = 0;
     gridEBO = 0;

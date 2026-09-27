@@ -154,19 +154,43 @@ class Object
     }
 };
 
-struct objectStateCpu
+struct GpuObjectState
 {
-    glm::vec4 position_mass;
-    glm::vec4 velocity_radius;
+    glm::vec4 position;
+    glm::vec4 velocity;
 };
 
-static_assert(sizeof(objectStateCpu) == 2 * sizeof(glm::vec4),
-              "objectStateCpu must be a vec4 pair for std430 compatibility.");
-static_assert(alignof(objectStateCpu) == alignof(glm::vec4),
-              "objectStateCpu must respect vec4 alignment.");
+struct GpuObjectPhysical
+{
+    glm::vec4 massDensity;
+};
+
+struct GpuObjectDerived
+{
+    glm::vec4 radiusRs;
+};
+
+struct GpuObjectControl
+{
+    std::uint32_t initializing;
+    std::uint32_t launched;
+    std::uint32_t target;
+    std::uint32_t padding;
+};
+
+struct GpuObjectAcceleration
+{
+    glm::vec4 acceleration;
+};
+
+static_assert(sizeof(GpuObjectState) == 2 * sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectAcceleration) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
-void ManageObjectStateBufferCapacity(std::vector<objectStateCpu> &stateData, size_t objectCount);
+void ManageObjectStateBufferCapacity(size_t objectCount);
 void UploadObjectState(size_t objectCount);
 
 extern bool running;
@@ -194,5 +218,4 @@ extern GLuint gridComputeShaderProgram;
 extern GpuMemoryManager gpuMemoryManager;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
-extern std::vector<objectStateCpu> objectData;
 extern size_t objectStateCapacity;

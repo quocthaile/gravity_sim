@@ -35,7 +35,6 @@ GLuint gridComputeShaderProgram;
 GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
-std::vector<objectStateCpu> objectData;
 size_t objectStateCapacity = 0;
 
 int main()
@@ -47,27 +46,34 @@ int main()
     GLint viewLoc = -1;
     // Initialize GLFW, create a window, and set up OpenGL context.
     GLFWwindow *window = StartGLU();
+    if (window == nullptr)
+    {
+        return -1;
+    }
     InitializeGlfwCallbacks(window);
     // Pass a file path here to load objects from CSV instead of using defaults.
     auto startTime = std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
+    
     auto endObjectTime = std::chrono::high_resolution_clock::now();
-    auto objectCreationDuration = std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
+    auto objectCreationDuration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
     std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
     size_t objectCount = objs.size();
-	std::cout << "Initial object count: " << objectCount << std::endl;
+    std::cout << "Initial object count: " << objectCount << std::endl;
     // Set up rendering resources, including shaders and camera position.
     InitializeRenderingResources(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc,
                                  cameraPos);
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
     InitializeGpuComputation();
-	auto endGridTime = std::chrono::high_resolution_clock::now();
-	std::cout << "Grid initialization time: "
-		<< std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime).count()
-		<< " ms" << std::endl;
+    auto endGridTime = std::chrono::high_resolution_clock::now();
+    std::cout << "Grid initialization time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
+                     .count()
+              << " ms" << std::endl;
     // Main render loop: update object states, run compute shader, and render scene.
-    
+
     int frameCount = 0;
     double fps = 0.0;
     double frameTime = 0.0;
@@ -126,24 +132,24 @@ int main()
                 obj.UpdatePosition();
             }
         }
+        // End of N-body computation. Update the vertex buffer for each object to reflect new positions.
 
-		auto endNBodyTime = std::chrono::high_resolution_clock::now();
-		std::cout << "N-body computation time: " << std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime - startNBodyTime).count() << " ms" << std::endl;
+        // Add benchmarking for the N-body computation time.
+        auto endNBodyTime = std::chrono::high_resolution_clock::now();
+        std::cout << "N-body computation time: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime -
+                                                                           startNBodyTime)
+                         .count()
+                  << " ms" << std::endl;
 
         // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {
             objectCount = checkObjectCount;
-            ManageObjectStateBufferCapacity(objectData, objectCount);
+            ManageObjectStateBufferCapacity(objectCount);
         }
-        // Update the object data with the current positions, velocities, and masses of all objects.
-        for (size_t i = 0; i < objectCount; ++i)
-        {
-            objectData[i].position_mass = glm::vec4(objs[i].GetPosition(), objs[i].mass);
-            objectData[i].velocity_radius = glm::vec4(objs[i].velocity, objs[i].rs);
-        }
-        // Upload the object state data to the GPU for use in the compute shader.
+        // Write CPU-authoritative object data directly into persistent mapped GPU storage.
         UploadObjectState(objectCount);
         // Run the compute shader to update the grid based on the current state of the objects.
         RunGridCompute(gridComputeShaderProgram, objectCount);
@@ -154,16 +160,18 @@ int main()
         // Swap buffers and poll for events.
         glfwSwapBuffers(window);
         glfwPollEvents();
-
+        // Update frame count and calculate FPS every second.
         frameCount++;
         auto CurrentFrameTime = std::chrono::high_resolution_clock::now();
-        auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(CurrentFrameTime - startLoopTime);
+        auto frameDuration =
+            std::chrono::duration_cast<std::chrono::milliseconds>(CurrentFrameTime - startLoopTime);
         if (frameDuration.count() >= 1000.0)
         {
             fps = frameCount / (frameDuration.count() / 1000.0);
             frameTime = 1.0 / fps;
-            std::cout << "Initial object count: " << objectCount << std::endl;
-            std::cout << "FPS: " << fps << std::endl << "Frame Time: " << frameTime << " s" << std::endl;
+            std::cout << "Object count: " << objectCount << std::endl;
+            std::cout << "FPS: " << fps << std::endl
+                      << "Frame Time: " << frameTime << " s" << std::endl;
             startLoopTime = CurrentFrameTime;
             frameCount = 0;
         }
