@@ -1,6 +1,7 @@
 #include "gpu_memory_manager.hpp"
 
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -43,6 +44,12 @@ void GpuBuffer::Allocate(const GpuBufferDesc &desc)
     if (desc.storageMode != GpuStorageMode::GpuResident)
     {
         throw std::invalid_argument("Unsupported GPU storage mode");
+    }
+    if (desc.capacity > std::numeric_limits<std::size_t>::max() / desc.elementSize ||
+        desc.capacity * desc.elementSize >
+            static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()))
+    {
+        throw std::length_error("GpuBuffer allocation size exceeds OpenGL limits");
     }
 
     Reset();
@@ -97,6 +104,10 @@ void GpuBuffer::AllocateStorage()
 
 void GpuBuffer::Resize(std::size_t newCapacity)
 {
+    if (newCapacity == 0)
+    {
+        throw std::invalid_argument("GpuBuffer capacity must be greater than zero");
+    }
     if (newCapacity == desc_.capacity)
     {
         return;
@@ -121,12 +132,23 @@ void GpuBuffer::Resize(std::size_t newCapacity)
 
 void GpuBuffer::Upload(const void *data, std::size_t byteCount, std::size_t byteOffset)
 {
-    if (byteOffset + byteCount > AllocatedBytes())
+    const std::size_t allocatedBytes = AllocatedBytes();
+    if (byteOffset > allocatedBytes || byteCount > allocatedBytes - byteOffset)
     {
         throw std::out_of_range("GpuBuffer upload exceeds allocated capacity");
     }
+    if (byteCount == 0)
+    {
+        return;
+    }
+    if (data == nullptr)
+    {
+        throw std::invalid_argument("GpuBuffer upload data must not be null");
+    }
 
-    if (mappedPtr_ != nullptr)
+    const bool cpuCanWrite =
+        desc_.cpuAccess == CpuAccess::Write || desc_.cpuAccess == CpuAccess::ReadWrite;
+    if (mappedPtr_ != nullptr && cpuCanWrite)
     {
         std::memcpy(static_cast<std::byte *>(mappedPtr_) + byteOffset, data, byteCount);
         return;
@@ -193,7 +215,12 @@ void GpuSynchronization::WaitForCpuWrite()
 void GpuSynchronization::FenceGpuCompletion()
 {
     Reset();
+    glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
     fence_ = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (fence_ == nullptr)
+    {
+        throw std::runtime_error("Unable to create GPU completion fence");
+    }
 }
 
 void GpuSynchronization::Reset()
@@ -223,7 +250,14 @@ GpuBuffer &GpuMemoryManager::Create(const GpuBufferDesc &desc)
     return it->second;
 }
 
-void GpuMemoryManager::Destroy(BufferRole role) { buffers_.erase(role); }
+void GpuMemoryManager::Destroy(BufferRole role)
+{
+    if (buffers_.contains(role))
+    {
+        WaitForCpuWrite();
+        buffers_.erase(role);
+    }
+}
 
 void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
 {
@@ -232,6 +266,7 @@ void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
     {
         return;
     }
+    WaitForCpuWrite();
     buffer.Resize(newCapacity);
     buffer.BindBase();
     ++reallocationCount_;
@@ -242,6 +277,10 @@ void GpuMemoryManager::Upload(BufferRole role, const void *data, std::size_t byt
                               std::size_t logicalCount, std::size_t byteOffset)
 {
     GpuBuffer &buffer = Get(role);
+    if (logicalCount > buffer.Capacity())
+    {
+        throw std::out_of_range("GPU buffer logical count exceeds capacity");
+    }
     buffer.Upload(data, byteCount, byteOffset);
     buffer.SetLogicalCount(logicalCount);
 }
@@ -276,7 +315,7 @@ bool GpuMemoryManager::Contains(BufferRole role) const { return buffers_.contain
 
 void GpuMemoryManager::Shutdown()
 {
-    synchronization_.Reset();
+    synchronization_.WaitForCpuWrite();
     buffers_.clear();
     peakAllocatedBytes_ = 0;
     allocationCount_ = 0;

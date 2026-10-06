@@ -183,14 +183,21 @@ struct GpuObjectAcceleration
     glm::vec4 acceleration;
 };
 
+struct GpuObjectRender
+{
+    glm::vec4 color;
+};
+
 static_assert(sizeof(GpuObjectState) == 2 * sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectAcceleration) == sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);
+void MaterializeObjectState(size_t firstObject, size_t objectCount);
 void UploadObjectState(size_t objectCount);
 
 extern bool running;

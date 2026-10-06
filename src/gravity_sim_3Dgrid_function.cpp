@@ -1,8 +1,17 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+
+namespace
+{
+bool SameVec4(const glm::vec4 &left, const glm::vec4 &right)
+{
+    return left.x == right.x && left.y == right.y && left.z == right.z && left.w == right.w;
+}
+} // namespace
 
 std::string LoadShaderSource(const std::string &filePath)
 {
@@ -261,6 +270,10 @@ size_t CalculateObjectStateBufferCapacity(size_t requiredCount)
     // Ensure the capacity is at least as large as the required count.
     while (capacity < requiredCount)
     {
+        if (capacity > std::numeric_limits<size_t>::max() / 2)
+        {
+            throw std::length_error("Object state capacity exceeds addressable memory");
+        }
         capacity *= 2;
     }
     return capacity;
@@ -297,19 +310,86 @@ void ManageObjectStateBufferCapacity(size_t objectCount)
     gpuMemoryManager.Resize(BufferRole::ObjectDerived, newCapacity);
     gpuMemoryManager.Resize(BufferRole::ObjectControl, newCapacity);
     gpuMemoryManager.Resize(BufferRole::ObjectAcceleration, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectRender, newCapacity);
 
     objectStateCapacity = newCapacity;
 }
 
-void UploadObjectState(size_t objectCount)
+void MaterializeObjectState(size_t firstObject, size_t objectCount)
 {
+    if (firstObject > objectCount || objectCount > objs.size() || objectCount > objectStateCapacity)
+    {
+        throw std::out_of_range("Object materialization range exceeds available objects/capacity");
+    }
+
     gpuMemoryManager.WaitForCpuWrite();
     auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
     auto *physical =
         gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
     auto *derived = gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
     auto *control = gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
-    if (state == nullptr || physical == nullptr || derived == nullptr || control == nullptr)
+    auto *render = gpuMemoryManager.Get(BufferRole::ObjectRender).MappedPtr<GpuObjectRender>();
+    if (state == nullptr || physical == nullptr || derived == nullptr || control == nullptr ||
+        render == nullptr)
+    {
+        throw std::runtime_error("CPU-facing object buffers must be persistently mapped");
+    }
+
+    std::vector<GpuObjectState> nextStates;
+    std::vector<GpuObjectAcceleration> zeroAccelerations;
+    nextStates.reserve(objectCount - firstObject);
+    zeroAccelerations.resize(objectCount - firstObject);
+    for (size_t i = firstObject; i < objectCount; ++i)
+    {
+        const Object &object = objs[i];
+        const GpuObjectState initialState = {glm::vec4(object.GetPosition(), 0.0f),
+                                             glm::vec4(object.velocity, 0.0f)};
+        state[i] = initialState;
+        physical[i] = {glm::vec4(object.mass, object.density, 0.0f, 0.0f)};
+        derived[i] = {glm::vec4(object.radius, object.rs, 0.0f, 0.0f)};
+        control[i] = {static_cast<std::uint32_t>(object.initializing),
+                      static_cast<std::uint32_t>(object.launched),
+                      static_cast<std::uint32_t>(object.target), 0};
+        render[i] = {object.color};
+        nextStates.push_back(initialState);
+    }
+
+    if (!nextStates.empty())
+    {
+        const std::size_t byteOffset = firstObject * sizeof(GpuObjectState);
+        gpuMemoryManager.Upload(BufferRole::NextState, nextStates.data(),
+                                nextStates.size() * sizeof(GpuObjectState), objectCount,
+                                byteOffset);
+        gpuMemoryManager.Upload(BufferRole::ObjectAcceleration, zeroAccelerations.data(),
+                                zeroAccelerations.size() * sizeof(GpuObjectAcceleration),
+                                objectCount, firstObject * sizeof(GpuObjectAcceleration));
+    }
+
+    for (BufferRole role :
+         {BufferRole::CurrentState, BufferRole::ObjectPhysical, BufferRole::ObjectDerived,
+          BufferRole::ObjectControl, BufferRole::ObjectAcceleration, BufferRole::ObjectRender})
+    {
+        gpuMemoryManager.Get(role).SetLogicalCount(objectCount);
+    }
+    gpuMemoryManager.Get(BufferRole::NextState).SetLogicalCount(objectCount);
+}
+
+void UploadObjectState(size_t objectCount)
+{
+    if (objectCount > objs.size() || objectCount > objectStateCapacity)
+    {
+        throw std::out_of_range("Object state upload exceeds available objects/capacity");
+    }
+
+    gpuMemoryManager.WaitForCpuWrite();
+    auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    auto *physical =
+        gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+    auto *derived = gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+    auto *control = gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    auto *render = gpuMemoryManager.Get(BufferRole::ObjectRender).MappedPtr<GpuObjectRender>();
+    if (state == nullptr || physical == nullptr || derived == nullptr || control == nullptr ||
+        render == nullptr)
     {
         throw std::runtime_error("CPU-facing object buffers must be persistently mapped");
     }
@@ -318,17 +398,31 @@ void UploadObjectState(size_t objectCount)
     {
         const Object &object = objs[i];
         state[i] = {glm::vec4(object.GetPosition(), 0.0f), glm::vec4(object.velocity, 0.0f)};
-        physical[i] = {glm::vec4(object.mass, object.density, 0.0f, 0.0f)};
-        derived[i] = {glm::vec4(object.radius, object.rs, 0.0f, 0.0f)};
-        control[i] = {static_cast<std::uint32_t>(object.initializing),
-                      static_cast<std::uint32_t>(object.launched),
-                      static_cast<std::uint32_t>(object.target), 0};
-    }
 
-    gpuMemoryManager.Get(BufferRole::CurrentState).SetLogicalCount(objectCount);
-    gpuMemoryManager.Get(BufferRole::ObjectPhysical).SetLogicalCount(objectCount);
-    gpuMemoryManager.Get(BufferRole::ObjectDerived).SetLogicalCount(objectCount);
-    gpuMemoryManager.Get(BufferRole::ObjectControl).SetLogicalCount(objectCount);
+        const glm::vec4 massDensity(object.mass, object.density, 0.0f, 0.0f);
+        if (!SameVec4(physical[i].massDensity, massDensity))
+        {
+            physical[i].massDensity = massDensity;
+        }
+        const glm::vec4 radiusRs(object.radius, object.rs, 0.0f, 0.0f);
+        if (!SameVec4(derived[i].radiusRs, radiusRs))
+        {
+            derived[i].radiusRs = radiusRs;
+        }
+        const GpuObjectControl objectControl = {static_cast<std::uint32_t>(object.initializing),
+                                                static_cast<std::uint32_t>(object.launched),
+                                                static_cast<std::uint32_t>(object.target), 0};
+        if (control[i].initializing != objectControl.initializing ||
+            control[i].launched != objectControl.launched ||
+            control[i].target != objectControl.target)
+        {
+            control[i] = objectControl;
+        }
+        if (!SameVec4(render[i].color, object.color))
+        {
+            render[i].color = object.color;
+        }
+    }
 }
 
 void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
@@ -363,12 +457,13 @@ void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
     }
 
     gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectState),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::NextState, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(GpuObjectState), objectStateCapacity});
+                             GpuStorageMode::GpuResident, CpuAccess::Read,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectState),
+                             objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectPhysical, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::Write,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectPhysical),
@@ -382,8 +477,13 @@ void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
                              MappingMode::PersistentCoherent, sizeof(GpuObjectControl),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectAcceleration, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(GpuObjectAcceleration), objectStateCapacity});
+                             GpuStorageMode::GpuResident, CpuAccess::Read,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectAcceleration),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectRender, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectRender),
+                             objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
                              sizeof(glm::vec4), gpuGridVertices.size()});

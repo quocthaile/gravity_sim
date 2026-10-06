@@ -54,7 +54,7 @@ int main()
     // Pass a file path here to load objects from CSV instead of using defaults.
     auto startTime = std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
-    
+
     auto endObjectTime = std::chrono::high_resolution_clock::now();
     auto objectCreationDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
@@ -67,6 +67,7 @@ int main()
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
     InitializeGpuComputation();
+    MaterializeObjectState(0, objectCount);
     auto endGridTime = std::chrono::high_resolution_clock::now();
     std::cout << "Grid initialization time: "
               << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
@@ -132,7 +133,8 @@ int main()
                 obj.UpdatePosition();
             }
         }
-        // End of N-body computation. Update the vertex buffer for each object to reflect new positions.
+        // End of N-body computation. Update the vertex buffer for each object to reflect new
+        // positions.
 
         // Add benchmarking for the N-body computation time.
         auto endNBodyTime = std::chrono::high_resolution_clock::now();
@@ -146,8 +148,11 @@ int main()
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {
+            const size_t firstChangedObject =
+                checkObjectCount > objectCount ? objectCount : checkObjectCount;
             objectCount = checkObjectCount;
             ManageObjectStateBufferCapacity(objectCount);
+            MaterializeObjectState(firstChangedObject, objectCount);
         }
         // Write CPU-authoritative object data directly into persistent mapped GPU storage.
         UploadObjectState(objectCount);
