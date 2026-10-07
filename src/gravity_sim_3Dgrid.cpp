@@ -31,7 +31,6 @@ std::vector<Object> objs = {};
 GLuint gridVAO = 0;
 GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-GLuint gridComputeShaderProgram;
 GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
@@ -41,6 +40,7 @@ int main()
 {
     // Initialize OpenGL resources.
     GLuint renderingShaderProgram = 0;
+    GLuint computeShaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
@@ -48,8 +48,10 @@ int main()
     GLFWwindow *window = StartGLU();
     if (window == nullptr)
     {
+        throw std::runtime_error("Failed to initialize GLFW and create a window.");
         return -1;
     }
+
     InitializeGlfwCallbacks(window);
     // Pass a file path here to load objects from CSV instead of using defaults.
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -61,18 +63,22 @@ int main()
     std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
     size_t objectCount = objs.size();
     std::cout << "Initial object count: " << objectCount << std::endl;
-    // Set up rendering resources, including shaders and camera position.
-    InitializeRenderingResources(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc,
-                                 cameraPos);
+    // Create shader programs, then initialize rendering uniforms and camera position.
+    CreateShaderProgram(renderingShaderProgram, computeShaderProgram);
+    InitializeRenderingState(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
-    InitializeGpuComputation();
-    MaterializeObjectState(0, objectCount);
+    std::vector<glm::vec4> gridVertices = CreateBaseGridGPU();
+    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
+    InitializeGridRenderingResources(gridVertices, gridIndices);
+
     auto endGridTime = std::chrono::high_resolution_clock::now();
     std::cout << "Grid initialization time: "
               << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
                      .count()
               << " ms" << std::endl;
+    ComputePipeline(gridVertices);
+    objectGpuState(0, objectCount);
     // Main render loop: update object states, run compute shader, and render scene.
 
     int frameCount = 0;
@@ -121,13 +127,6 @@ int main()
                     }
                 }
             }
-            if (obj.initializing)
-            {
-                obj.radius =
-                    pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) /
-                    100000;
-                obj.UpdateVertexBuffer();
-            }
             if (!pause)
             {
                 obj.UpdatePosition();
@@ -148,16 +147,12 @@ int main()
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {
-            const size_t firstChangedObject =
-                checkObjectCount > objectCount ? objectCount : checkObjectCount;
-            objectCount = checkObjectCount;
-            ManageObjectStateBufferCapacity(objectCount);
-            MaterializeObjectState(firstChangedObject, objectCount);
+            SynchronizeObjectStateCount(objectCount, checkObjectCount);
         }
         // Write CPU-authoritative object data directly into persistent mapped GPU storage.
         UploadObjectState(objectCount);
         // Run the compute shader to update the grid based on the current state of the objects.
-        RunGridCompute(gridComputeShaderProgram, objectCount);
+        RunGridCompute(computeShaderProgram, objectCount);
         // Render the deformed grid and all objects in the scene.
         DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
@@ -182,6 +177,6 @@ int main()
         }
     } // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
-    Cleanup(renderingShaderProgram, gridComputeShaderProgram);
+    Cleanup(renderingShaderProgram, computeShaderProgram);
     return 0;
 }

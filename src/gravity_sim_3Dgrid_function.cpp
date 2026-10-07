@@ -24,17 +24,20 @@ std::string LoadShaderSource(const std::string &filePath)
                        std::istreambuf_iterator<char>());
 }
 
-void InitializeRenderingResources(GLuint &renderingShaderProgram, GLint &modelLocation,
-                                  GLint &objectColorLocation, GLint &viewLocation,
-                                  glm::vec3 &cameraPosition)
+void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram)
 {
     std::string vertexShaderSource = LoadShaderSource("shaders/grid.vert");
     std::string fragmentShaderSource = LoadShaderSource("shaders/grid.frag");
     std::string computeShaderSource = LoadShaderSource("shaders/grid.comp");
     renderingShaderProgram =
-        CreateShaderProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
-    gridComputeShaderProgram = CreateComputeProgram(computeShaderSource.c_str());
+        CreateGraphicsProgram(vertexShaderSource.c_str(), fragmentShaderSource.c_str());
+    computeShaderProgram = CreateComputeProgram(computeShaderSource.c_str());
+}
 
+void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
+                              GLint &objectColorLocation, GLint &viewLocation,
+                              glm::vec3 &cameraPosition)
+{
     modelLocation = glGetUniformLocation(renderingShaderProgram, "model");
     objectColorLocation = glGetUniformLocation(renderingShaderProgram, "objectColor");
     viewLocation = glGetUniformLocation(renderingShaderProgram, "view");
@@ -143,7 +146,7 @@ GLFWwindow *StartGLU()
     return window;
 }
 
-GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
+GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource)
 {
     GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertexShader, 1, &vertexSource, nullptr);
@@ -315,7 +318,7 @@ void ManageObjectStateBufferCapacity(size_t objectCount)
     objectStateCapacity = newCapacity;
 }
 
-void MaterializeObjectState(size_t firstObject, size_t objectCount)
+void objectGpuState(size_t firstObject, size_t objectCount)
 {
     if (firstObject > objectCount || objectCount > objs.size() || objectCount > objectStateCapacity)
     {
@@ -374,6 +377,14 @@ void MaterializeObjectState(size_t firstObject, size_t objectCount)
     gpuMemoryManager.Get(BufferRole::NextState).SetLogicalCount(objectCount);
 }
 
+void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount)
+{
+    const size_t firstChangedObject = newObjectCount > objectCount ? objectCount : newObjectCount;
+    objectCount = newObjectCount;
+    ManageObjectStateBufferCapacity(objectCount);
+    objectGpuState(firstChangedObject, objectCount);
+}
+
 void UploadObjectState(size_t objectCount)
 {
     if (objectCount > objs.size() || objectCount > objectStateCapacity)
@@ -425,10 +436,10 @@ void UploadObjectState(size_t objectCount)
     }
 }
 
-void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
+void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
+                                      const std::vector<unsigned int> &gridIndices)
 {
-    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
-    gridNodeCount = gpuGridVertices.size();
+    gridNodeCount = gridVertices.size();
     gridIndexCount = gridIndices.size();
 
     glGenVertexArrays(1, &gridVAO);
@@ -436,8 +447,8 @@ void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
     glGenBuffers(1, &gridEBO);
     glBindVertexArray(gridVAO);
     glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-    glBufferData(GL_ARRAY_BUFFER, gpuGridVertices.size() * sizeof(glm::vec4),
-                 gpuGridVertices.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(glm::vec4), gridVertices.data(),
+                 GL_DYNAMIC_DRAW);
     // location 0, 3 positions, type float, not normalized, stride is size of glm::vec4, offset is 0
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
     glEnableVertexAttribArray(0);
@@ -448,7 +459,7 @@ void RenderingPipeline(const std::vector<glm::vec4> &gpuGridVertices)
     glBindVertexArray(0);
 }
 
-void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
+void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
 {
     objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
     if (objectStateCapacity == 0)
@@ -486,19 +497,12 @@ void ComputePipeline(const std::vector<glm::vec4> &gpuGridVertices)
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::vec4), gpuGridVertices.size()});
-    gpuMemoryManager.Upload(BufferRole::BaseGrid, gpuGridVertices.data(),
-                            gpuGridVertices.size() * sizeof(glm::vec4), gpuGridVertices.size());
+                             sizeof(glm::vec4), gridVertices.size()});
+    gpuMemoryManager.Upload(BufferRole::BaseGrid, gridVertices.data(),
+                            gridVertices.size() * sizeof(glm::vec4), gridVertices.size());
     gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::vec4), gpuGridVertices.size()});
-}
-
-void InitializeGpuComputation()
-{
-    std::vector<glm::vec4> gpuGridVertices = CreateBaseGridGPU();
-    RenderingPipeline(gpuGridVertices);
-    ComputePipeline(gpuGridVertices);
+                             sizeof(glm::vec4), gridVertices.size()});
 }
 
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
@@ -548,7 +552,6 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
     gridVAO = 0;
     gridVBO = 0;
     gridEBO = 0;
-    gridComputeShaderProgram = 0;
     objectStateCapacity = 0;
     gridNodeCount = 0;
     gridIndexCount = 0;
@@ -563,18 +566,19 @@ void UpdateInitializingObject(GLFWwindow *window)
     if (objs.empty() || !objs.back().initializing)
         return;
 
+    Object &initializingObject = objs.back();
     if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     {
-        Object &initializingObject = objs.back();
         initializingObject.mass *= 1.0 + 1.0 * deltaTime;
         initializingObject.rs = (2 * kGravitationalConstant * initializingObject.mass) /
                                 (kSpeedOfLight * kSpeedOfLight);
-        initializingObject.radius =
-            pow((3 * initializingObject.mass / initializingObject.density) / (4 * 3.14159265359f),
-                1.0f / 3.0f) /
-            100000.0f;
-        initializingObject.UpdateVertexBuffer();
     }
+
+    initializingObject.radius =
+        pow((3 * initializingObject.mass / initializingObject.density) / (4 * 3.14159265359f),
+            1.0f / 3.0f) /
+        100000.0f;
+    initializingObject.UpdateVertexBuffer();
 }
 
 void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition)

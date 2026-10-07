@@ -20,18 +20,19 @@ class Object;
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
-void InitializeRenderingResources(GLuint &renderingShaderProgram, GLint &modelLocation,
-                                  GLint &objectColorLocation, GLint &viewLocation,
-                                  glm::vec3 &cameraPosition);
-GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
+void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram);
+void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
+                              GLint &objectColorLocation, GLint &viewLocation,
+                              glm::vec3 &cameraPosition);
+GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
 void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
                        GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
 std::vector<glm::vec4> CreateBaseGridGPU();
-void RenderingPipeline(const std::vector<glm::vec4> &basePositions);
+void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
+                                      const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
-void InitializeGpuComputation();
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
 void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram);
 void BeginFrame();
@@ -197,7 +198,8 @@ static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);
-void MaterializeObjectState(size_t firstObject, size_t objectCount);
+void objectGpuState(size_t firstObject, size_t objectCount);
+void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount);
 void UploadObjectState(size_t objectCount);
 
 extern bool running;
@@ -221,7 +223,6 @@ extern std::vector<Object> objs;
 extern GLuint gridVAO;
 extern GLuint gridVBO;
 extern GLuint gridEBO;
-extern GLuint gridComputeShaderProgram;
 extern GpuMemoryManager gpuMemoryManager;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;
