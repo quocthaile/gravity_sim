@@ -10,8 +10,8 @@ GpuBuffer::GpuBuffer(const GpuBufferDescription &bufferDescription) { Allocate(b
 GpuBuffer::~GpuBuffer() { Reset(); }
 
 GpuBuffer::GpuBuffer(GpuBuffer &&other) noexcept
-    : bufferDescription_(other.bufferDescription_), handle_(other.handle_), mappedPtr_(other.mappedPtr_),
-      logicalCount_(other.logicalCount_)
+    : bufferDescription_(other.bufferDescription_), handle_(other.handle_),
+      mappedPtr_(other.mappedPtr_), logicalCount_(other.logicalCount_)
 {
     other.handle_ = 0;
     other.mappedPtr_ = nullptr;
@@ -45,7 +45,8 @@ void GpuBuffer::Allocate(const GpuBufferDescription &bufferDescription)
     {
         throw std::invalid_argument("Unsupported GPU storage mode");
     }
-    if (bufferDescription.capacity > std::numeric_limits<std::size_t>::max() / bufferDescription.elementSize ||
+    if (bufferDescription.capacity >
+            std::numeric_limits<std::size_t>::max() / bufferDescription.elementSize ||
         bufferDescription.capacity * bufferDescription.elementSize >
             static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()))
     {
@@ -68,12 +69,14 @@ void GpuBuffer::AllocateStorage()
         {
             throw std::invalid_argument("Persistent mapping requires CPU access");
         }
-        if (bufferDescription_.cpuAccess == CpuAccess::Read || bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
+        if (bufferDescription_.cpuAccess == CpuAccess::Read ||
+            bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
         {
             storageFlags |= GL_MAP_READ_BIT;
             mappingFlags |= GL_MAP_READ_BIT;
         }
-        if (bufferDescription_.cpuAccess == CpuAccess::Write || bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
+        if (bufferDescription_.cpuAccess == CpuAccess::Write ||
+            bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
         {
             storageFlags |= GL_MAP_WRITE_BIT;
             mappingFlags |= GL_MAP_WRITE_BIT;
@@ -88,11 +91,12 @@ void GpuBuffer::AllocateStorage()
     }
 
     glBindBuffer(bufferDescription_.target, handle_);
-    glBufferStorage(bufferDescription_.target, static_cast<GLsizeiptr>(AllocatedBytes()), nullptr, storageFlags);
+    glBufferStorage(bufferDescription_.target, static_cast<GLsizeiptr>(AllocatedBytes()), nullptr,
+                    storageFlags);
     if (bufferDescription_.mappingMode != MappingMode::None)
     {
-        mappedPtr_ = glMapBufferRange(bufferDescription_.target, 0, static_cast<GLsizeiptr>(AllocatedBytes()),
-                                      mappingFlags);
+        mappedPtr_ = glMapBufferRange(bufferDescription_.target, 0,
+                                      static_cast<GLsizeiptr>(AllocatedBytes()), mappingFlags);
         if (mappedPtr_ == nullptr)
         {
             glBindBuffer(bufferDescription_.target, 0);
@@ -146,9 +150,8 @@ void GpuBuffer::Upload(const void *data, std::size_t byteCount, std::size_t byte
         throw std::invalid_argument("GpuBuffer upload data must not be null");
     }
 
-    const bool cpuCanWrite =
-        bufferDescription_.cpuAccess == CpuAccess::Write ||
-        bufferDescription_.cpuAccess == CpuAccess::ReadWrite;
+    const bool cpuCanWrite = bufferDescription_.cpuAccess == CpuAccess::Write ||
+                             bufferDescription_.cpuAccess == CpuAccess::ReadWrite;
     if (mappedPtr_ != nullptr && cpuCanWrite)
     {
         std::memcpy(static_cast<std::byte *>(mappedPtr_) + byteOffset, data, byteCount);
@@ -163,7 +166,10 @@ void GpuBuffer::Upload(const void *data, std::size_t byteCount, std::size_t byte
 
 void GpuBuffer::BindBase() const { BindBase(BindingFor(bufferDescription_.role)); }
 
-void GpuBuffer::BindBase(GLuint binding) const { glBindBufferBase(bufferDescription_.target, binding, handle_); }
+void GpuBuffer::BindBase(GLuint binding) const
+{
+    glBindBufferBase(bufferDescription_.target, binding, handle_);
+}
 
 void GpuBuffer::Reset()
 {
@@ -287,6 +293,17 @@ void GpuMemoryManager::Upload(BufferRole role, const void *data, std::size_t byt
 }
 
 void GpuMemoryManager::Bind(BufferRole role) const { Get(role).BindBase(); }
+
+void GpuMemoryManager::SwapCurrentNext()
+{
+    GpuBuffer &currentState = Get(BufferRole::CurrentState);
+    GpuBuffer &nextState = Get(BufferRole::NextState);
+    std::swap(currentState, nextState);
+    currentState.SetRole(BufferRole::CurrentState);
+    nextState.SetRole(BufferRole::NextState);
+    currentState.BindBase();
+    nextState.BindBase();
+}
 
 void GpuMemoryManager::WaitForCpuWrite() { synchronization_.WaitForCpuWrite(); }
 

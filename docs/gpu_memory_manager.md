@@ -10,8 +10,8 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 
 | Role | Binding | Mapping policy | Current use |
 | --- | ---: | --- | --- |
-| `CurrentState` | 0 | Persistent coherent CPU read/write | Current position and velocity consumed by `grid.comp` |
-| `NextState` | 1 | Persistent coherent CPU read | Reserved for future state ping-pong |
+| `CurrentState` | 0 | Persistent coherent CPU observation | Logical current position and velocity consumed by compute |
+| `NextState` | 1 | Persistent coherent CPU observation | Logical destination for the next state transition |
 | `ObjectPhysical` | 2 | Persistent coherent CPU write | Mass and density |
 | `ObjectControl` | 3 | Persistent coherent CPU write | Initializing, launched, and target flags plus stable object `id` |
 | `BaseGrid` | 4 | GPU-only | Static grid input |
@@ -23,9 +23,11 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 | `LODMetadata` | 10 | GPU-only | Reserved |
 | `Metrics` | 11 | GPU-only | Reserved |
 | `ObjectDerived` | 12 | Persistent coherent CPU write | Radius and Schwarzschild radius |
-| `ObjectAcceleration` | 13 | Persistent coherent CPU read | Reserved for future GPU computation |
+| `ObjectAcceleration` | 13 | Persistent coherent CPU observation | GPU acceleration plus ordered velocity contribution for collision-compatible integration |
 | `ObjectRender` | 14 | Persistent coherent CPU write | Object color |
 | — | 15 | — | Reserved |
+
+`CurrentState` and `NextState` are logical roles, not permanent physical buffer identities. `GpuMemoryManager::SwapCurrentNext()` exchanges the owned buffers without copying storage, updates each buffer's role, and rebinds SSBO slots 0 and 1. Consequently `Get(CurrentState)` and its `MappedPtr` always resolve to the current timestep after a swap.
 
 The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, and `GpuObjectRender` structures. Rendering resources such as per-object VAOs, VBOs, and vertex count stay in `Object` and are not part of SSBO data.
 
@@ -33,24 +35,19 @@ The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `G
 
 `Object::id` is a stable logical identity used for validation and baseline/GPU result matching. It is allocated by `AllocateObjectId()` (monotonic, starting at 1; 0 is reserved as unassigned) inside the `Object` constructor, so every creation path (CSV, default bodies, random orbiters, mouse-created objects) receives a unique ID that is deterministic within one run and is preserved by normal vector copy/move.
 
-`GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `UploadObjectState` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
+`GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `SynchronizeObjectControlState` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
 
 The GPU slot `i` (the index into the per-object buffers, which currently equals the `objs` vector index) is a storage location, not an identity. Consumers must match objects by `id`, never by slot.
 
-## CPU to GPU path
+## Runtime state transition
 
-CPU `Object` instances remain authoritative. After the unchanged CPU Direct N-body, collision, and integration work, the CPU writes selected buffers through typed mappings:
+CPU `Object` data initializes GPU state and handles lifecycle/control events. During normal frames, `nbody.comp` reads logical `CurrentState`, physical data, control flags, and derived radii; `integrate.comp` reads the resulting acceleration and writes logical `NextState`; then `SwapCurrentNext()` changes the logical roles without copying state. The CPU does not mirror position or velocity each frame, and the normal loop does not upload the full object state.
 
-```cpp
-auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
-state[index].position = glm::vec4(object.GetPosition(), 0.0f);
-```
-
-The runtime also writes physical, derived, and control data to their dedicated mappings. There is no temporary object-state upload array and no per-frame map/unmap cycle. `GpuBuffer::Upload` remains available for GPU-only initialization uploads such as `BaseGrid`.
+New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectControlState`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
 
 ## Synchronization and resizing
 
-Coherent mapping provides CPU/GPU visibility for the selected CPU-write buffers. It does not grant simultaneous ownership of a region. `GpuSynchronization` inserts a `GLsync` fence after the grid GPU work. Before the CPU writes mapped object storage again, `WaitForCpuWrite` first performs a non-blocking readiness query and only waits if the GPU has not completed. This avoids CPU writes while the compute dispatch may still read the protected data. GPU-to-CPU consumption is not currently needed; a future reader must wait for its producer fence before reading mapped bytes.
+Coherent mapping provides CPU/GPU visibility for mapped buffers; `GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT` orders CPU writes before the N-body dispatch. It does not grant simultaneous ownership of a region. `GpuSynchronization` inserts a `GLsync` fence after the grid GPU work. Before the CPU writes mapped object storage again, `WaitForCpuWrite` first performs a non-blocking readiness query and only waits if the GPU has not completed. Validation readback waits for GPU completion before reading `mappedPtr`; normal performance frames do not read back state.
 
 `glBufferStorage` is immutable. A capacity change creates a replacement `GpuBuffer`, establishes a replacement mapping when needed, preserves logical contents with a GPU copy, rebinds the semantic role, then releases the old resource. The old mapping is explicitly unmapped during replacement/reset/destruction.
 
@@ -65,9 +62,9 @@ BaseGrid + CurrentState/ObjectDerived -> grid.comp -> DeformedGrid
 
 `glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` establishes the GPU-side compute-write -> vertex-fetch dependency. `glFenceSync` (via `FenceGpuCompletion`/`WaitForCpuWrite`) is conceptually separate: it is a GPU completion checkpoint for CPU synchronization of mapped object storage, not a resource-visibility barrier, and neither replaces the other. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
 
-## Scope boundary
+## Validation status
 
-This layer does not migrate physics. CPU Direct N-body, collision, integration, timestep behavior, and the grid deformation equation remain unchanged. `grid.comp` is still the existing grid-deformation consumer, not a N-body, mass accumulation, field, blur, or integration compute pass.
+`gravity_sim_3Dgrid_phase2_validation` creates a hidden OpenGL 4.4 context, compiles and links the N-body and integration shaders, checks acceleration and one-step/multi-step state against an independent snapshot-based CPU oracle by stable object ID, and verifies physical buffer handles and SSBO bindings exchange on every step. This validates the GPU transition and its synchronization path. It does not claim numerical equivalence to `src/gravity_sim_3Dgrid_baseline.cpp`: that legacy loop uses no epsilon softening and updates positions in vector order, while the GPU transition intentionally reads one immutable timestep snapshot. `DrawObjects()` remains CPU-driven and is outside this phase.
 
 ## Accounting
 

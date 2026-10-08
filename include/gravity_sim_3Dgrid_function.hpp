@@ -33,6 +33,7 @@ void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocatio
                               glm::vec3 &cameraPosition);
 GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
+GLuint CreateComputeProgramFromFile(const std::string &filePath);
 void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
                        GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
@@ -40,6 +41,10 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
+void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon, bool paused);
+void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused);
+void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
+                           size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
 void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram);
 void BeginFrame();
@@ -194,6 +199,7 @@ struct GpuObjectControl
 struct GpuObjectAcceleration
 {
     glm::vec4 acceleration;
+    glm::vec4 velocityContribution;
 };
 
 struct GpuObjectRender
@@ -206,14 +212,15 @@ static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
 static_assert(offsetof(GpuObjectControl, id) == 3 * sizeof(std::uint32_t));
-static_assert(sizeof(GpuObjectAcceleration) == sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectAcceleration) == 2 * sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);
 void objectGpuState(size_t firstObject, size_t objectCount);
 void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount);
-void UploadObjectState(size_t objectCount);
+void SynchronizeObjectControlState(size_t objectIndex);
+void UploadInitializingObjectState(size_t objectIndex);
 
 extern bool running;
 extern bool pause;

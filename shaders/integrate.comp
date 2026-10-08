@@ -1,0 +1,60 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct ObjectAcceleration
+{
+    vec4 acceleration;
+    vec4 velocityContribution;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState currentState[]; };
+layout(std430, binding = 1) writeonly buffer NextStateBuffer { ObjectState nextState[]; };
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer { ObjectControl controls[]; };
+layout(std430, binding = 13) readonly buffer ObjectAccelerationBuffer
+{
+    ObjectAcceleration accelerations[];
+};
+
+uniform uint u_objectCount;
+uniform uint u_paused;
+
+void main()
+{
+    uint objectIndex = gl_GlobalInvocationID.x;
+    if (objectIndex >= u_objectCount)
+    {
+        return;
+    }
+
+    ObjectState source = currentState[objectIndex];
+    vec3 velocity = source.velocity.xyz;
+    if (controls[objectIndex].initializing == 0u)
+    {
+        vec4 contribution = accelerations[objectIndex].velocityContribution;
+        velocity = velocity * contribution.w + contribution.xyz / 96.0;
+    }
+
+    vec3 position = source.position.xyz;
+    if (u_paused == 0u)
+    {
+        position += velocity / 94.0;
+    }
+
+    nextState[objectIndex].position = vec4(position, source.position.w);
+    nextState[objectIndex].velocity = vec4(velocity, source.velocity.w);
+}

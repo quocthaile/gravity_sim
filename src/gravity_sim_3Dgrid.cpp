@@ -40,6 +40,8 @@ int main()
     // Initialize OpenGL resources.
     GLuint renderingShaderProgram = 0;
     GLuint computeShaderProgram = 0;
+    GLuint nbodyShaderProgram = 0;
+    GLuint integrateShaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
@@ -64,6 +66,8 @@ int main()
     std::cout << "Initial object count: " << objectCount << std::endl;
     // Create shader programs, then initialize rendering uniforms and camera position.
     CreateShaderProgram(renderingShaderProgram, computeShaderProgram);
+    nbodyShaderProgram = CreateComputeProgramFromFile("shaders/nbody.comp");
+    integrateShaderProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
     InitializeRenderingState(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
@@ -86,6 +90,7 @@ int main()
     double frameTime = 0.0;
     std::cout << "Starting main loop..." << std::endl;
     auto startLoopTime = std::chrono::high_resolution_clock::now();
+    const float epsilon = 10.0f;
     while (!glfwWindowShouldClose(window) && running == true)
     {
         // Calculate delta time for smooth motion and physics updates.
@@ -95,63 +100,20 @@ int main()
 
         BeginFrame();
         UpdateCamera(renderingShaderProgram, viewLoc, cameraPos);
-        UpdateInitializingObject(window);
 
-        // N-body gravitational interactions between all objects in the simulation.
-        float epsilon = 10.0f;
-        auto startNBodyTime = std::chrono::high_resolution_clock::now();
-        for (auto &obj : objs)
-        {
-            for (auto &obj2 : objs)
-            {
-                if (&obj2 != &obj && !obj.initializing && !obj2.initializing)
-                {
-                    float dx = obj2.GetPosition()[0] - obj.GetPosition()[0];
-                    float dy = obj2.GetPosition()[1] - obj.GetPosition()[1];
-                    float dz = obj2.GetPosition()[2] - obj.GetPosition()[2];
-                    float distance = sqrt(dx * dx + dy * dy + dz * dz);
-                    if (distance > 0)
-                    {
-                        glm::vec3 direction(dx / distance, dy / distance, dz / distance);
-                        distance *= 1000;
-                        double gravitationalForce =
-                            (kGravitationalConstant * obj.mass * obj2.mass) /
-                            (distance * distance + epsilon * epsilon);
-                        float acceleration = gravitationalForce / obj.mass;
-                        if (!pause)
-                        {
-                            obj.Accelerate(direction.x * acceleration, direction.y * acceleration,
-                                           direction.z * acceleration);
-                        }
-                        obj.velocity *= obj.CheckCollision(obj2);
-                    }
-                }
-            }
-            if (!pause)
-            {
-                obj.UpdatePosition();
-            }
-        }
-        // End of N-body computation. Update the vertex buffer for each object to reflect new
-        // positions.
-
-        // Add benchmarking for the N-body computation time.
-        auto endNBodyTime = std::chrono::high_resolution_clock::now();
-        std::cout << "N-body computation time: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime -
-                                                                           startNBodyTime)
-                         .count()
-                  << " ms" << std::endl;
-
-        // Check if the number of objects has changed and synchronize GPU buffers accordingly.
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {
             SynchronizeObjectStateCount(objectCount, checkObjectCount);
         }
-        // Write CPU-authoritative object data directly into persistent mapped GPU storage.
-        UploadObjectState(objectCount);
-        // Run the compute shader to update the grid based on the current state of the objects.
+        UpdateInitializingObject(window);
+        if (!objs.empty() && objs.back().initializing)
+        {
+            SynchronizeObjectControlState(objs.size() - 1);
+        }
+
+        RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram, objectCount, epsilon,
+                              pause);
         RunGridCompute(computeShaderProgram, objectCount);
         // Render the deformed grid and all objects in the scene.
         DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
@@ -170,6 +132,10 @@ int main()
             fps = frameCount / (frameDuration.count() / 1000.0);
             frameTime = 1.0 / fps;
             std::cout << "Object count: " << objectCount << std::endl;
+            std::cout << "CurrentState buffer: "
+                      << gpuMemoryManager.Get(BufferRole::CurrentState).Handle()
+                      << ", NextState buffer: "
+                      << gpuMemoryManager.Get(BufferRole::NextState).Handle() << std::endl;
             std::cout << "FPS: " << fps << std::endl
                       << "Frame Time: " << frameTime << " s" << std::endl;
             startLoopTime = CurrentFrameTime;
@@ -177,6 +143,8 @@ int main()
         }
     } // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
+    glDeleteProgram(nbodyShaderProgram);
+    glDeleteProgram(integrateShaderProgram);
     Cleanup(renderingShaderProgram, computeShaderProgram);
     return 0;
 }

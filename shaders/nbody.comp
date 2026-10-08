@@ -1,0 +1,104 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectPhysical
+{
+    vec4 massDensity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct ObjectDerived
+{
+    vec4 radiusRs;
+};
+
+struct ObjectAcceleration
+{
+    vec4 acceleration;
+    vec4 velocityContribution;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState objects[]; };
+layout(std430, binding = 2) readonly buffer ObjectPhysicalBuffer { ObjectPhysical physical[]; };
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer { ObjectControl controls[]; };
+layout(std430, binding = 12) readonly buffer ObjectDerivedBuffer { ObjectDerived derived[]; };
+layout(std430, binding = 13) writeonly buffer ObjectAccelerationBuffer
+{
+    ObjectAcceleration accelerations[];
+};
+
+uniform uint u_objectCount;
+uniform double u_gravitationalConstant;
+uniform float u_epsilon;
+uniform uint u_paused;
+
+void main()
+{
+    uint targetIndex = gl_GlobalInvocationID.x;
+    if (targetIndex >= u_objectCount)
+    {
+        return;
+    }
+
+    if (controls[targetIndex].initializing != 0u)
+    {
+        accelerations[targetIndex].acceleration = vec4(0.0);
+        accelerations[targetIndex].velocityContribution = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    vec3 targetPosition = objects[targetIndex].position.xyz;
+    float targetMass = physical[targetIndex].massDensity.x;
+    vec3 totalAcceleration = vec3(0.0);
+    vec3 weightedAcceleration = vec3(0.0);
+    float velocityScale = 1.0;
+
+    for (uint sourceIndex = 0u; sourceIndex < u_objectCount; ++sourceIndex)
+    {
+        if (sourceIndex == targetIndex || controls[sourceIndex].initializing != 0u)
+        {
+            continue;
+        }
+
+        vec3 displacement = objects[sourceIndex].position.xyz - targetPosition;
+        float distance = length(displacement);
+        if (distance <= 0.0)
+        {
+            continue;
+        }
+
+        vec3 direction = displacement / distance;
+        float distanceMeters = distance * 1000.0;
+        float softenedDistanceSquared = distanceMeters * distanceMeters + u_epsilon * u_epsilon;
+        float sourceMass = physical[sourceIndex].massDensity.x;
+        double gravitationalForce =
+            (u_gravitationalConstant * double(targetMass) * double(sourceMass)) /
+            double(softenedDistanceSquared);
+        float accelerationMagnitude = float(gravitationalForce / double(targetMass));
+        vec3 pairAcceleration = direction * accelerationMagnitude;
+        totalAcceleration += pairAcceleration;
+
+        float collisionScale =
+            derived[sourceIndex].radiusRs.x + derived[targetIndex].radiusRs.x > distance ? -0.2 : 1.0;
+        vec3 appliedAcceleration = u_paused == 0u ? pairAcceleration : vec3(0.0);
+        weightedAcceleration = (weightedAcceleration + appliedAcceleration) * collisionScale;
+        velocityScale *= collisionScale;
+    }
+
+    accelerations[targetIndex].acceleration = vec4(totalAcceleration, 0.0);
+    accelerations[targetIndex].velocityContribution = vec4(weightedAcceleration, velocityScale);
+}

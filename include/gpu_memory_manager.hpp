@@ -120,13 +120,18 @@ class GpuBuffer
     std::size_t LogicalCount() const { return logicalCount_; }
     std::size_t Capacity() const { return bufferDescription_.capacity; }
     std::size_t LogicalBytes() const { return logicalCount_ * bufferDescription_.elementSize; }
-    std::size_t AllocatedBytes() const { return bufferDescription_.capacity * bufferDescription_.elementSize; }
+    std::size_t AllocatedBytes() const
+    {
+        return bufferDescription_.capacity * bufferDescription_.elementSize;
+    }
     bool IsMapped() const { return mappedPtr_ != nullptr; }
     void SetLogicalCount(std::size_t count);
 
   private:
+    friend class GpuMemoryManager;
+    void SetRole(BufferRole role) { bufferDescription_.role = role; }
     void AllocateStorage();
-    GpuBufferDescription bufferDescription_{};    
+    GpuBufferDescription bufferDescription_{};
     GLuint handle_ = 0;
     void *mappedPtr_ = nullptr;
     std::size_t logicalCount_ = 0;
@@ -153,6 +158,7 @@ class GpuMemoryManager
     void Upload(BufferRole role, const void *data, std::size_t byteCount, std::size_t logicalCount,
                 std::size_t byteOffset = 0);
     void Bind(BufferRole role) const;
+    void SwapCurrentNext();
     void WaitForCpuWrite();
     void FenceGpuCompletion();
     GpuBuffer &Get(BufferRole role);
