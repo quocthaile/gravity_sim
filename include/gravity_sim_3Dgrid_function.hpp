@@ -5,6 +5,8 @@
 #include <GLFW/glfw3.h>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -17,6 +19,11 @@ extern const double kGravitationalConstant;
 extern const float kSpeedOfLight;
 
 class Object;
+
+// Stable logical object identity used for validation/result matching. It is independent of the
+// object's vector index or GPU slot. 0 is reserved as "unassigned"; allocated IDs start at 1.
+constexpr std::uint32_t kInvalidObjectId = 0;
+std::uint32_t AllocateObjectId();
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
@@ -56,6 +63,8 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath = {},
 class Object
 {
   public:
+    // Identity (stable logical ID, not the vector index / GPU slot)
+    std::uint32_t id = kInvalidObjectId;
     // Rendering state
     GLuint VAO, VBO;
     glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
@@ -78,6 +87,7 @@ class Object
     // Constructor
     Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass, float density = 3344)
     {
+        this->id = AllocateObjectId();
         this->position = initPosition;
         this->velocity = initVelocity;
         this->mass = mass;
@@ -176,7 +186,9 @@ struct GpuObjectControl
     std::uint32_t initializing;
     std::uint32_t launched;
     std::uint32_t target;
-    std::uint32_t padding;
+    // Stable logical object ID (mirrors Object::id). Reuses the former padding slot so the
+    // struct stays 16 bytes and the std430 layout at binding 3 is unchanged.
+    std::uint32_t id;
 };
 
 struct GpuObjectAcceleration
@@ -193,6 +205,7 @@ static_assert(sizeof(GpuObjectState) == 2 * sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
+static_assert(offsetof(GpuObjectControl, id) == 3 * sizeof(std::uint32_t));
 static_assert(sizeof(GpuObjectAcceleration) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
@@ -221,7 +234,6 @@ extern const GLuint kGridLocalSizeX;
 extern const GLuint kGridLocalSizeY;
 extern std::vector<Object> objs;
 extern GLuint gridVAO;
-extern GLuint gridVBO;
 extern GLuint gridEBO;
 extern GpuMemoryManager gpuMemoryManager;
 extern size_t gridNodeCount;

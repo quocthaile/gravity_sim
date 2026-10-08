@@ -10,12 +10,12 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 
 | Role | Binding | Mapping policy | Current use |
 | --- | ---: | --- | --- |
-| `CurrentState` | 0 | Persistent coherent CPU write | Current position and velocity consumed by `grid.comp` |
-| `NextState` | 1 | GPU-only | Reserved for future state ping-pong |
+| `CurrentState` | 0 | Persistent coherent CPU read/write | Current position and velocity consumed by `grid.comp` |
+| `NextState` | 1 | Persistent coherent CPU read | Reserved for future state ping-pong |
 | `ObjectPhysical` | 2 | Persistent coherent CPU write | Mass and density |
-| `ObjectControl` | 3 | Persistent coherent CPU write | Initializing, launched, and target flags |
+| `ObjectControl` | 3 | Persistent coherent CPU write | Initializing, launched, and target flags plus stable object `id` |
 | `BaseGrid` | 4 | GPU-only | Static grid input |
-| `DeformedGrid` | 5 | GPU-only | Grid compute output |
+| `DeformedGrid` | 5 | GPU-only | Grid compute output; also the grid VAO vertex source |
 | `MassField` | 6 | GPU-only | Reserved |
 | `BlurFieldA` | 7 | GPU-only | Reserved |
 | `BlurFieldB` | 8 | GPU-only | Reserved |
@@ -23,9 +23,19 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 | `LODMetadata` | 10 | GPU-only | Reserved |
 | `Metrics` | 11 | GPU-only | Reserved |
 | `ObjectDerived` | 12 | Persistent coherent CPU write | Radius and Schwarzschild radius |
-| `ObjectAcceleration` | 13 | GPU-only | Reserved for future GPU computation |
+| `ObjectAcceleration` | 13 | Persistent coherent CPU read | Reserved for future GPU computation |
+| `ObjectRender` | 14 | Persistent coherent CPU write | Object color |
+| — | 15 | — | Reserved |
 
-Bindings 14 and 15 remain reserved. The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, and `GpuObjectAcceleration` structures. Rendering state such as VAOs, VBOs, color, and vertex count stays in `Object` and is not part of simulation SSBO data.
+The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, and `GpuObjectRender` structures. Rendering resources such as per-object VAOs, VBOs, and vertex count stay in `Object` and are not part of SSBO data.
+
+### Object identity
+
+`Object::id` is a stable logical identity used for validation and baseline/GPU result matching. It is allocated by `AllocateObjectId()` (monotonic, starting at 1; 0 is reserved as unassigned) inside the `Object` constructor, so every creation path (CSV, default bodies, random orbiters, mouse-created objects) receives a unique ID that is deterministic within one run and is preserved by normal vector copy/move.
+
+`GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `UploadObjectState` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
+
+The GPU slot `i` (the index into the per-object buffers, which currently equals the `objs` vector index) is a storage location, not an identity. Consumers must match objects by `id`, never by slot.
 
 ## CPU to GPU path
 
@@ -44,7 +54,16 @@ Coherent mapping provides CPU/GPU visibility for the selected CPU-write buffers.
 
 `glBufferStorage` is immutable. A capacity change creates a replacement `GpuBuffer`, establishes a replacement mapping when needed, preserves logical contents with a GPU copy, rebinds the semantic role, then releases the old resource. The old mapping is explicitly unmapped during replacement/reset/destruction.
 
-The existing `GL_SHADER_STORAGE_BARRIER_BIT` remains scoped to `DeformedGrid` shader writes before copying into the grid VBO. `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT` remains scoped to the subsequent rendering dependency. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
+### Grid data path
+
+`DeformedGrid` is consumed directly as grid vertex input; there is no intermediate `gridVBO` copy target and no `glCopyBufferSubData`. The same OpenGL buffer object is bound as SSBO binding 5 for `grid.comp` writes and as `GL_ARRAY_BUFFER` when `InitializeGridRenderingResources` configures `gridVAO` (attribute 0, 3 floats, stride `sizeof(glm::vec4)`, offset 0). `gridEBO` remains a separate static index buffer. Because the VAO captures the `DeformedGrid` handle, `ComputePipeline` must create `DeformedGrid` before the VAO is configured, and a future `DeformedGrid` resize would require re-pointing the VAO.
+
+```text
+BaseGrid + CurrentState/ObjectDerived -> grid.comp -> DeformedGrid
+    -> glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT) -> gridVAO -> DrawGrid()
+```
+
+`glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` establishes the GPU-side compute-write -> vertex-fetch dependency. `glFenceSync` (via `FenceGpuCompletion`/`WaitForCpuWrite`) is conceptually separate: it is a GPU completion checkpoint for CPU synchronization of mapped object storage, not a resource-visibility barrier, and neither replaces the other. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
 
 ## Scope boundary
 

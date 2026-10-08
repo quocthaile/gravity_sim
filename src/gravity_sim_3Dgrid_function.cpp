@@ -13,6 +13,18 @@ bool SameVec4(const glm::vec4 &left, const glm::vec4 &right)
 }
 } // namespace
 
+std::uint32_t AllocateObjectId()
+{
+    // Monotonic, deterministic within one run: IDs follow Object construction order and are never
+    // reused, so they stay unique among simultaneously existing objects.
+    static std::uint32_t nextObjectId = kInvalidObjectId + 1;
+    if (nextObjectId == std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::overflow_error("Object ID space exhausted");
+    }
+    return nextObjectId++;
+}
+
 std::string LoadShaderSource(const std::string &filePath)
 {
     std::ifstream shaderFile(filePath);
@@ -352,7 +364,7 @@ void objectGpuState(size_t firstObject, size_t objectCount)
         derived[i] = {glm::vec4(object.radius, object.rs, 0.0f, 0.0f)};
         control[i] = {static_cast<std::uint32_t>(object.initializing),
                       static_cast<std::uint32_t>(object.launched),
-                      static_cast<std::uint32_t>(object.target), 0};
+                      static_cast<std::uint32_t>(object.target), object.id};
         render[i] = {object.color};
         nextStates.push_back(initialState);
     }
@@ -422,10 +434,11 @@ void UploadObjectState(size_t objectCount)
         }
         const GpuObjectControl objectControl = {static_cast<std::uint32_t>(object.initializing),
                                                 static_cast<std::uint32_t>(object.launched),
-                                                static_cast<std::uint32_t>(object.target), 0};
+                                                static_cast<std::uint32_t>(object.target),
+                                                object.id};
         if (control[i].initializing != objectControl.initializing ||
             control[i].launched != objectControl.launched ||
-            control[i].target != objectControl.target)
+            control[i].target != objectControl.target || control[i].id != objectControl.id)
         {
             control[i] = objectControl;
         }
@@ -439,16 +452,21 @@ void UploadObjectState(size_t objectCount)
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices)
 {
+    // The grid VAO sources its vertices directly from the DeformedGrid buffer written by
+    // grid.comp, so ComputePipeline() must have created DeformedGrid before this is called.
+    const GpuBuffer &deformedGrid = gpuMemoryManager.Get(BufferRole::DeformedGrid);
+    if (deformedGrid.Capacity() < gridVertices.size())
+    {
+        throw std::length_error("DeformedGrid capacity is smaller than the grid node count");
+    }
+
     gridNodeCount = gridVertices.size();
     gridIndexCount = gridIndices.size();
 
     glGenVertexArrays(1, &gridVAO);
-    glGenBuffers(1, &gridVBO);
     glGenBuffers(1, &gridEBO);
     glBindVertexArray(gridVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(glm::vec4), gridVertices.data(),
-                 GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, deformedGrid.Handle());
     // location 0, 3 positions, type float, not normalized, stride is size of glm::vec4, offset is 0
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
     glEnableVertexAttribArray(0);
@@ -457,6 +475,7 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int),
                  gridIndices.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
@@ -520,16 +539,11 @@ void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
     // Dispatch the compute shader with the calculated number of work groups.
     glDispatchCompute(groupCountX, groupCountY, 1);
 
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    glBindBuffer(GL_COPY_READ_BUFFER, gpuMemoryManager.Get(BufferRole::DeformedGrid).Handle());
-    glBindBuffer(GL_COPY_WRITE_BUFFER, gridVBO);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                        gridNodeCount * sizeof(glm::vec4));
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-
+    // grid.comp writes DeformedGrid as an SSBO; the grid VAO fetches the same buffer as vertex
+    // attributes. This barrier orders that compute write -> vertex fetch dependency on the GPU.
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+    // CPU/GPU completion checkpoint guarding the next persistent-mapped object writes. This is
+    // separate from (and not a substitute for) the memory barrier above.
     gpuMemoryManager.FenceGpuCompletion();
 }
 
@@ -542,7 +556,6 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
     }
 
     glDeleteVertexArrays(1, &gridVAO);
-    glDeleteBuffers(1, &gridVBO);
     glDeleteBuffers(1, &gridEBO);
     gpuMemoryManager.Shutdown();
     glDeleteProgram(renderingShaderProgram);
@@ -550,7 +563,6 @@ void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram)
 
     objs.clear();
     gridVAO = 0;
-    gridVBO = 0;
     gridEBO = 0;
     objectStateCapacity = 0;
     gridNodeCount = 0;

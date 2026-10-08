@@ -1,7 +1,6 @@
 #pragma once
 
 #include <GL/glew.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -83,7 +82,7 @@ constexpr GLuint BindingFor(BufferRole role)
     return 0;
 }
 
-struct GpuBufferDesc
+struct GpuBufferDescription
 {
     BufferRole role;
     GLenum target = GL_SHADER_STORAGE_BUFFER;
@@ -98,7 +97,7 @@ class GpuBuffer
 {
   public:
     GpuBuffer() = default;
-    explicit GpuBuffer(const GpuBufferDesc &desc);
+    explicit GpuBuffer(const GpuBufferDescription &bufferDescription);
     ~GpuBuffer();
 
     GpuBuffer(const GpuBuffer &) = delete;
@@ -106,7 +105,7 @@ class GpuBuffer
     GpuBuffer(GpuBuffer &&other) noexcept;
     GpuBuffer &operator=(GpuBuffer &&other) noexcept;
 
-    void Allocate(const GpuBufferDesc &desc);
+    void Allocate(const GpuBufferDescription &bufferDescription);
     void Resize(std::size_t newCapacity);
     void Upload(const void *data, std::size_t byteCount, std::size_t byteOffset = 0);
     void BindBase() const;
@@ -117,19 +116,17 @@ class GpuBuffer
     template <typename T> const T *MappedPtr() const { return static_cast<const T *>(mappedPtr_); }
 
     GLuint Handle() const { return handle_; }
-    const GpuBufferDesc &Desc() const { return desc_; }
+    const GpuBufferDescription &Desc() const { return bufferDescription_; }
     std::size_t LogicalCount() const { return logicalCount_; }
-    std::size_t Capacity() const { return desc_.capacity; }
-    std::size_t LogicalBytes() const { return logicalCount_ * desc_.elementSize; }
-    std::size_t AllocatedBytes() const { return desc_.capacity * desc_.elementSize; }
+    std::size_t Capacity() const { return bufferDescription_.capacity; }
+    std::size_t LogicalBytes() const { return logicalCount_ * bufferDescription_.elementSize; }
+    std::size_t AllocatedBytes() const { return bufferDescription_.capacity * bufferDescription_.elementSize; }
     bool IsMapped() const { return mappedPtr_ != nullptr; }
-
     void SetLogicalCount(std::size_t count);
 
   private:
     void AllocateStorage();
-
-    GpuBufferDesc desc_{};
+    GpuBufferDescription bufferDescription_{};    
     GLuint handle_ = 0;
     void *mappedPtr_ = nullptr;
     std::size_t logicalCount_ = 0;
@@ -139,7 +136,6 @@ class GpuSynchronization
 {
   public:
     ~GpuSynchronization();
-
     void WaitForCpuWrite();
     void FenceGpuCompletion();
     void Reset();
@@ -151,7 +147,7 @@ class GpuSynchronization
 class GpuMemoryManager
 {
   public:
-    GpuBuffer &Create(const GpuBufferDesc &desc);
+    GpuBuffer &Create(const GpuBufferDescription &bufferDescription);
     void Destroy(BufferRole role);
     void Resize(BufferRole role, std::size_t newCapacity);
     void Upload(BufferRole role, const void *data, std::size_t byteCount, std::size_t logicalCount,
@@ -174,7 +170,6 @@ class GpuMemoryManager
 
   private:
     void UpdatePeakAllocation();
-
     std::map<BufferRole, GpuBuffer> buffers_;
     GpuSynchronization synchronization_;
     std::size_t peakAllocatedBytes_ = 0;

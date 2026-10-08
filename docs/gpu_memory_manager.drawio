@@ -1,6 +1,6 @@
 <mxfile host="Electron" pages="2">
   <diagram id="J1UsOU0u7H9rKUIx8fgn" name="class GMemory">
-    <mxGraphModel dx="383" dy="270" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="1885" dy="1121" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -97,7 +97,7 @@
         <mxCell id="nr27joB4SLp5pt1ReJ9Y-43" parent="nr27joB4SLp5pt1ReJ9Y-34" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;whiteSpace=wrap;html=1;" value="target" vertex="1">
           <mxGeometry height="26" width="140" y="78" as="geometry" />
         </mxCell>
-        <mxCell id="nr27joB4SLp5pt1ReJ9Y-49" parent="1" style="whiteSpace=wrap;html=1;align=left;fontSize=14;spacingLeft=10;" value="&lt;div&gt;&lt;b&gt;SSBO binding points&lt;/b&gt;&lt;/div&gt;&lt;div&gt;0&amp;nbsp; CurrentState&lt;/div&gt;&lt;div&gt;1&amp;nbsp; NextState&lt;/div&gt;&lt;div&gt;2&amp;nbsp; ObjectPhysical&lt;/div&gt;&lt;div&gt;3&amp;nbsp; ObjectControl&lt;/div&gt;&lt;div&gt;4&amp;nbsp; BaseGrid&lt;/div&gt;&lt;div&gt;5&amp;nbsp; DeformedGrid&lt;/div&gt;&lt;div&gt;6&amp;nbsp; MassField&lt;/div&gt;&lt;div&gt;7&amp;nbsp; BlurFieldA&lt;/div&gt;&lt;div&gt;8&amp;nbsp; BlurFieldB&lt;/div&gt;&lt;div&gt;9&amp;nbsp; AccelerationField&lt;/div&gt;&lt;div&gt;10 LODMetadata&lt;/div&gt;&lt;div&gt;11 Metrics&lt;/div&gt;&lt;div&gt;12 ObjectDerived&lt;/div&gt;&lt;div&gt;13 ObjectAcceleration&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;" vertex="1">
+        <mxCell id="nr27joB4SLp5pt1ReJ9Y-49" parent="1" style="whiteSpace=wrap;html=1;align=left;fontSize=14;spacingLeft=10;" value="&lt;div&gt;&lt;b&gt;SSBO binding points&lt;/b&gt;&lt;/div&gt;&lt;div&gt;0&amp;nbsp; CurrentState&lt;/div&gt;&lt;div&gt;1&amp;nbsp; NextState&lt;/div&gt;&lt;div&gt;2&amp;nbsp; ObjectPhysical&lt;/div&gt;&lt;div&gt;3&amp;nbsp; ObjectControl&lt;/div&gt;&lt;div&gt;4&amp;nbsp; BaseGrid&lt;/div&gt;&lt;div&gt;5&amp;nbsp; DeformedGrid&lt;/div&gt;&lt;div&gt;6&amp;nbsp; MassField&lt;/div&gt;&lt;div&gt;7&amp;nbsp; BlurFieldA&lt;/div&gt;&lt;div&gt;8&amp;nbsp; BlurFieldB&lt;/div&gt;&lt;div&gt;9&amp;nbsp; AccelerationField&lt;/div&gt;&lt;div&gt;10 LODMetadata&lt;/div&gt;&lt;div&gt;11 Metrics&lt;/div&gt;&lt;div&gt;12 ObjectDerived&lt;/div&gt;&lt;div&gt;13 ObjectAcceleration&lt;/div&gt;&lt;div&gt;14 ObjectRender&lt;/div&gt;" vertex="1">
           <mxGeometry height="355" width="166" x="560" y="389" as="geometry" />
         </mxCell>
         <mxCell id="nr27joB4SLp5pt1ReJ9Y-82" edge="1" parent="1" source="nr27joB4SLp5pt1ReJ9Y-60" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;jumpStyle=arc;" target="nr27joB4SLp5pt1ReJ9Y-79">

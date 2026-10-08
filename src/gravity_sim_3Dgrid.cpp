@@ -29,7 +29,6 @@ float lastFrame = 0.0f;
 // OpenGL resources and simulation objects shared by the render loop and callbacks.
 std::vector<Object> objs = {};
 GLuint gridVAO = 0;
-GLuint gridVBO = 0;
 GLuint gridEBO = 0;
 GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
@@ -70,6 +69,8 @@ int main()
     auto startGridTime = std::chrono::high_resolution_clock::now();
     std::vector<glm::vec4> gridVertices = CreateBaseGridGPU();
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
+    // Create GPU buffers first: the grid VAO sources vertices directly from DeformedGrid.
+    ComputePipeline(gridVertices);
     InitializeGridRenderingResources(gridVertices, gridIndices);
 
     auto endGridTime = std::chrono::high_resolution_clock::now();
@@ -77,7 +78,6 @@ int main()
               << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
                      .count()
               << " ms" << std::endl;
-    ComputePipeline(gridVertices);
     objectGpuState(0, objectCount);
     // Main render loop: update object states, run compute shader, and render scene.
 
@@ -143,7 +143,7 @@ int main()
                          .count()
                   << " ms" << std::endl;
 
-        // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
+        // Check if the number of objects has changed and synchronize GPU buffers accordingly.
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {

@@ -81,6 +81,9 @@ Object hiện tại chứa nhiều loại thông tin:
 
 ```text
 Object
+├── Identity
+│   └── id
+│
 ├── Simulation state
 │   ├── position
 │   └── velocity
@@ -136,12 +139,29 @@ ObjectControl
     initializing
     launched
     target
+    id
 
 ObjectRender
     color
 ```
 
 `VAO`, `VBO` và các CPU/OpenGL resource handle không phải simulation data và không thuộc GPU object-state contract.
+
+### Object identity
+
+`Object::id` là logical identity ổn định của object, dùng cho validation và để ghép kết quả baseline với kết quả GPU khi tính sai số.
+
+```text
+Object.id  (logical identity)
+    |
+    v
+GpuObjectControl.id  (ObjectControl, binding 3)
+```
+
+- `id` được cấp bởi `AllocateObjectId()` trong constructor của `Object`: monotonic, bắt đầu từ 1 (0 = unassigned), deterministic trong một lần chạy, không tái sử dụng.
+- Mọi đường tạo object (CSV, default objects, random orbiters, object tạo bằng chuột) đều đi qua constructor nên đều có `id` duy nhất; copy/move của `std::vector` giữ nguyên `id`.
+- `GpuObjectControl.id` tái sử dụng field `uint32` thứ tư (trước đây là padding), nên struct vẫn 16 bytes và std430 layout không đổi.
+- GPU slot / vector index `i` chỉ là vị trí lưu trữ, **không** phải identity. Validation phải ghép theo `id`, không theo slot.
 
 ---
 
@@ -237,9 +257,10 @@ CPU validation/debug via mappedPtr
 initializing
 launched
 target
+id
 ```
 
-Đóng vai trò control plane.
+Đóng vai trò control plane. `id` là logical identity của object (xem Object identity), không phải slot index.
 
 Control event từ CPU chỉ cập nhật phần object bị thay đổi, không cần upload toàn bộ object array.
 
@@ -252,6 +273,33 @@ color
 Phục vụ GPU rendering.
 
 Buffer này không tham gia physics computation trừ khi một rendering rule cần control state.
+
+### BaseGrid / DeformedGrid
+
+`BaseGrid` (binding 4) là static grid input. `DeformedGrid` (binding 5, `glm::vec4`, GPU-only, immutable storage) là output của `grid.comp` và đồng thời là vertex source trực tiếp của `gridVAO`. Không còn `gridVBO` trung gian và không còn `glCopyBufferSubData`.
+
+```text
+CurrentState/ObjectDerived/BaseGrid
+        |
+        v
+    grid.comp
+        |
+        v
+   DeformedGrid
+        |
+        v
+glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)
+        |
+        v
+     gridVAO
+        |
+        v
+    DrawGrid()
+```
+
+- `glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` thiết lập dependency compute write -> vertex attribute fetch trên GPU.
+- `glFenceSync` (`FenceGpuCompletion` / `WaitForCpuWrite`) là GPU completion checkpoint cho CPU synchronization, tách biệt về khái niệm với memory barrier; cái này không thay thế cái kia.
+- Per-object `Object::VAO/VBO` không liên quan và vẫn giữ nguyên.
 
 ---
 
@@ -695,6 +743,8 @@ reference result         GPU result
 ```
 
 Baseline không cần chạy đồng thời như một CPU shadow copy của GPU simulation.
+
+Kết quả baseline và GPU được ghép theo `Object.id` / `GpuObjectControl.id`, không theo vector index hoặc GPU slot.
 
 ---
 
@@ -1506,7 +1556,7 @@ GPU-RESIDENT OBJECT RUNTIME
           |       v
           |   CurrentState
           |
-          +--> GPU Grid Compute
+          +--> GPU Grid Compute -> DeformedGrid -> gridVAO (direct vertex input)
           |
           +--> GPU Instanced Rendering
           |
