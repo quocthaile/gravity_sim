@@ -3,8 +3,8 @@
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
-const float kSpeedOfLight = 299792458.0;
-float initMass = 5.0f * pow(10, 20) / 5;
+const float kSpeedOfLight = 299792458.0; // đổi từ float qua double
+float initMass = 5.0f * pow(10, 20) / 5; // đổi từ float qua double
 int numRandomObjects = 200;
 float gridSize = 30000.0f;
 int gridDivisions = 200;
@@ -37,6 +37,15 @@ size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
 size_t objectStateCapacity = 0;
 
+// Mass aggregation
+float CEll_SIZE = gridSize / gridDivisions;
+float worldMin = -gridSize / 2.0f;
+float worldMax = gridSize / 2.0f;
+GLuint objectCellID = 0;
+
+// numerical error
+double dt = 1.0 / 96.0;
+
 int main()
 {
     // Initialize OpenGL resources.
@@ -54,7 +63,20 @@ int main()
     // Pass a file path here to load objects from CSV instead of using defaults.
     auto startTime = std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
-    
+    std::cout << "Object list: " << std::endl;
+    for (size_t i = 0; i < objs.size(); ++i)
+    {
+        const Object &obj = objs[i];
+        std::cout << "Object " << i + 1 << ":";
+        std::cout << "   Mass: " << obj.mass << std::endl;
+        std::cout << "   Radius: " << obj.radius << std::endl;
+        std::cout << "   Position: " << obj.position.x << ", " << obj.position.y << ", "
+                  << obj.position.z << std::endl;
+        std::cout << "   Velocity: " << obj.velocity.x << ", " << obj.velocity.y << ", "
+                  << obj.velocity.z << std::endl;
+        std::cout << "   Density: " << obj.density << std::endl;
+    }
+
     auto endObjectTime = std::chrono::high_resolution_clock::now();
     auto objectCreationDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
@@ -72,6 +94,10 @@ int main()
               << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
                      .count()
               << " ms" << std::endl;
+
+    // mass aggregation
+    std::cout << "Cell size: " << CEll_SIZE << std::endl;
+    // CreateObjectCellID(objs, objectCellID);
     // Main render loop: update object states, run compute shader, and render scene.
 
     int frameCount = 0;
@@ -79,10 +105,19 @@ int main()
     double frameTime = 0.0;
     std::cout << "Starting main loop..." << std::endl;
     auto startLoopTime = std::chrono::high_resolution_clock::now();
+
+    double T = 10.0;
+    int numSteps = static_cast<int>(T / dt);
+    std::vector<std::vector<glm::vec3>> positions;
+    positions.reserve(numSteps);
+    bool saved = false;
+
+    int numofFrames = 0;
     while (!glfwWindowShouldClose(window) && running == true)
     {
+        std::cout << "Frame: " << numofFrames << ", Delta Time: " << deltaTime << " s" << std::endl;
         // Calculate delta time for smooth motion and physics updates.
-        float currentFrame = glfwGetTime();
+        float currentFrame = glfwGetTime(); // đổi từ float qua double
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
@@ -93,46 +128,68 @@ int main()
         // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
         auto startNBodyTime = std::chrono::high_resolution_clock::now();
-        for (auto &obj : objs)
+
+        // One simulation step per rendered frame.
         {
-            for (auto &obj2 : objs)
+            for (auto &obj : objs)
             {
-                if (&obj2 != &obj && !obj.initializing && !obj2.initializing)
+                for (auto &obj2 : objs)
                 {
-                    float dx = obj2.GetPosition()[0] - obj.GetPosition()[0];
-                    float dy = obj2.GetPosition()[1] - obj.GetPosition()[1];
-                    float dz = obj2.GetPosition()[2] - obj.GetPosition()[2];
-                    float distance = sqrt(dx * dx + dy * dy + dz * dz);
-                    if (distance > 0)
+                    if (&obj2 != &obj && !obj.initializing && !obj2.initializing)
                     {
-                        glm::vec3 direction(dx / distance, dy / distance, dz / distance);
-                        distance *= 1000;
-                        double gravitationalForce =
-                            (kGravitationalConstant * obj.mass * obj2.mass) /
-                            (distance * distance + epsilon * epsilon);
-                        float acceleration = gravitationalForce / obj.mass;
-                        if (!pause)
+                        float dx = obj2.GetPosition()[0] - obj.GetPosition()[0];
+                        float dy = obj2.GetPosition()[1] - obj.GetPosition()[1];
+                        float dz = obj2.GetPosition()[2] - obj.GetPosition()[2];
+                        float distance = sqrt(dx * dx + dy * dy + dz * dz);
+                        if (distance > 0)
                         {
-                            obj.Accelerate(direction.x * acceleration, direction.y * acceleration,
-                                           direction.z * acceleration);
+                            glm::vec3 direction(dx / distance, dy / distance, dz / distance);
+                            distance *= 1000;
+                            float gravitationalForce =
+                                (kGravitationalConstant * obj.mass * obj2.mass) /
+                                (distance * distance + epsilon * epsilon);
+                            float acceleration =
+                                gravitationalForce / obj.mass; // đổi từ float qua double
+                            if (!pause)
+                            {
+                                obj.Accelerate(direction.x * acceleration,
+                                               direction.y * acceleration,
+                                               direction.z * acceleration, dt);
+                            }
+                            obj.velocity *= obj.CheckCollision(obj2);
                         }
-                        obj.velocity *= obj.CheckCollision(obj2);
                     }
                 }
+                if (obj.initializing)
+                {
+                    obj.radius =
+                        pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) /
+                        100000;
+                    obj.UpdateVertexBuffer();
+                }
+                if (!pause)
+                {
+                    obj.UpdatePosition(dt);
+                }
             }
-            if (obj.initializing)
+
+            if (!pause && !saved && objs.size() == objectCount)
             {
-                obj.radius =
-                    pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) /
-                    100000;
-                obj.UpdateVertexBuffer();
-            }
-            if (!pause)
-            {
-                obj.UpdatePosition();
+                positions.emplace_back();
+                for (auto &obj : objs)
+                {
+                    positions.back().push_back(obj.GetPosition());
+                }
+                if (static_cast<int>(positions.size()) >= numSteps)
+                {
+                    SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv", positions, dt);
+                    saved = true;
+                }
             }
         }
-        // End of N-body computation. Update the vertex buffer for each object to reflect new positions.
+
+        // End of N-body computation. Update the vertex buffer for each object to reflect new
+        // positions.
 
         // Add benchmarking for the N-body computation time.
         auto endNBodyTime = std::chrono::high_resolution_clock::now();
@@ -175,7 +232,13 @@ int main()
             startLoopTime = CurrentFrameTime;
             frameCount = 0;
         }
-    } // Main loop ends when window is closed or running is set to false.
+        numofFrames++;
+    }
+    if (!saved && !positions.empty())
+    {
+        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv", positions, dt);
+    }
+    // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
     Cleanup(renderingShaderProgram, gridComputeShaderProgram);
     return 0;

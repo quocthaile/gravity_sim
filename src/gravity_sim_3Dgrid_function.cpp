@@ -3,6 +3,48 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <iomanip>
+#include <cstdint>
+
+void SavePositions(
+    const char* filename,
+    const std::vector<std::vector<glm::vec3>>& positions, double dt)
+{
+    std::ofstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Cannot open file: " << filename << '\n';
+        return;
+    }
+
+    file << "time,step,object_id,x,y,z\n";
+    file << std::setprecision(10);
+
+    for (size_t step = 0; step < positions.size(); ++step) {
+        double simulationTime = static_cast<double>(step) * dt;
+
+        for (size_t objectId = 0;
+            objectId < positions[step].size();
+            ++objectId)
+        {
+            const auto& p = positions[step][objectId];
+
+            file << simulationTime << ','
+                << step << ','
+                << objectId << ','
+                << p.x << ','
+                << p.y << ','
+                << p.z << '\n';
+        }
+    }
+
+    if (!file.good()) {
+        std::cerr << "Error writing CSV: " << filename << '\n';
+    }
+    else {
+        std::cout << "Saved positions to " << filename << '\n';
+    }
+}
 
 std::string LoadShaderSource(const std::string &filePath)
 {
@@ -706,7 +748,7 @@ std::vector<unsigned int> CreateGridIndices(int divisions)
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass)
 {
     (void)centralMass;
-    std::mt19937 rng(std::random_device{}());
+    std::mt19937 rng(123);
     std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
     std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
     std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
@@ -796,3 +838,27 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
     defaultObjects.insert(defaultObjects.end(), randomBodies.begin(), randomBodies.end());
     return defaultObjects;
 }
+
+// GLuint CreateObjectCellID(const std::vector<Object> &objects, GLuint &cellIDBuffer)
+// {
+//     std::vector<GLuint> cellIDs(objects.size());
+//     for (size_t i = 0; i < objects.size(); ++i)
+//     {
+//         const Object &obj = objects[i];
+//         glm::ivec3 cellIndex = glm::ivec3(
+//             static_cast<int>((obj.position.x + gridSize / 2.0f) / (gridSize / gridDivisions)),
+//             static_cast<int>((obj.position.y + gridSize / 2.0f) / (gridSize / gridDivisions)),
+//             static_cast<int>((obj.position.z + gridSize / 2.0f) / (gridSize / gridDivisions)));
+//         cellIDs[i] = static_cast<GLuint>(cellIndex.x + cellIndex.y * (gridDivisions + 1) +
+//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions + 1));
+//     }
+
+//     glGenBuffers(1, &cellIDBuffer);
+//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, cellIDBuffer);
+//     glBufferData(GL_SHADER_STORAGE_BUFFER, cellIDs.size() * sizeof(GLuint), cellIDs.data(),
+//                  GL_STATIC_DRAW);
+//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+//     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, cellIDBuffer);
+
+//     return cellIDBuffer;
+// }

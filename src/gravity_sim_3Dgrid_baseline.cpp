@@ -6,7 +6,7 @@
 #include <vector>
 #include <iostream>
 #include <chrono>
-#include <random>'
+#include <random>
 #include <fstream>
 
 const char* vertexShaderSource = R"glsl(#version 330 core
@@ -36,6 +36,48 @@ float lastFrame = 0.0;
 const double G = 6.6743e-11; // m^3 kg^-1 s^-2
 const float c = 299792458.0;
 float initMass = 5.0f * pow(10, 20) / 5;
+
+//numerical error
+double dt = 1.0/96.0;
+void SavePositions(
+    const char* filename,
+    const std::vector<std::vector<glm::vec3>>& positions, double dt)
+{
+    std::ofstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Cannot open file: " << filename << '\n';
+        return;
+    }
+
+    file << "time,step,object_id,x,y,z\n";
+    file << std::setprecision(10);
+
+    for (size_t step = 0; step < positions.size(); ++step) {
+        double simulationTime = static_cast<double>(step) * dt;
+
+        for (size_t objectId = 0;
+            objectId < positions[step].size();
+            ++objectId)
+        {
+            const auto& p = positions[step][objectId];
+
+            file << simulationTime << ','
+                << step << ','
+                << objectId << ','
+                << p.x << ','
+                << p.y << ','
+                << p.z << '\n';
+        }
+    }
+
+    if (!file.good()) {
+        std::cerr << "Error writing CSV: " << filename << '\n';
+    }
+    else {
+        std::cout << "Saved positions to " << filename << '\n';
+    }
+}
 
 GLFWwindow* StartGLU();
 GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource);
@@ -114,10 +156,13 @@ class Object {
             return vertices;
         }
         
-        void UpdatePos(){
-            this->position[0] += this->velocity[0] / 94;
-            this->position[1] += this->velocity[1] / 94;
-            this->position[2] += this->velocity[2] / 94;
+        void UpdatePos(double dt){
+            //this->position[0] += this->velocity[0] / 94;
+            //this->position[1] += this->velocity[1] / 94;
+            //this->position[2] += this->velocity[2] / 94;
+            this->position[0] += this->velocity[0] * dt;
+            this->position[1] += this->velocity[1] * dt;
+            this->position[2] += this->velocity[2] * dt;
             this->radius = pow(((3 * this->mass/this->density)/(4 * 3.14159265359)), (1.0f/3.0f)) / 100000;
         }
         void UpdateVertices() {
@@ -131,10 +176,13 @@ class Object {
         glm::vec3 GetPos() const {
             return this->position;
         }
-        void accelerate(float x, float y, float z){
-            this->velocity[0] += x / 96;
-            this->velocity[1] += y / 96;
-            this->velocity[2] += z / 96;
+        void accelerate(float x, float y, float z, double dt){
+            //this->velocity[0] += x / 96;
+            //this->velocity[1] += y / 96;
+            //this->velocity[2] += z / 96;
+            this->velocity[0] += x * dt;
+            this->velocity[1] += y * dt;
+            this->velocity[2] += z * dt;
         }
         float CheckCollision(const Object& other) {
             float dx = other.position[0] - this->position[0];
@@ -157,7 +205,7 @@ GLuint gridVAO, gridVBO; // 100x100 grid with 10 divisions
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3& center, float centralMass)
 {
     (void)centralMass;
-    std::mt19937 rng(std::random_device{}());
+    std::mt19937 rng(123);
     std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
     std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
     std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
@@ -274,6 +322,16 @@ int main() {
     //    Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219*pow(10, 24), 5515),
     //};
     objs = CreateObjects({}, 200);
+	std::cout << "Object list: " << std::endl;
+	for (size_t i = 0; i < objs.size(); ++i) {
+		const Object& obj = objs[i];
+        std::cout << "Object " << i+1 << ":";
+        std::cout << "   Mass: " << obj.mass << std::endl;
+        std::cout << "   Radius: " << obj.radius << std::endl;
+        std::cout << "   Position: " << obj.position.x << ", " << obj.position.y << ", " << obj.position.z << std::endl;
+		std::cout << "   Velocity: " << obj.velocity.x << ", " << obj.velocity.y << ", " << obj.velocity.z << std::endl;
+		std::cout << "   Density: " << obj.density << std::endl;
+	}
 
     auto endObjTime = std::chrono::high_resolution_clock::now();
     auto objectCreationDuration = std::chrono::duration_cast<std::chrono::milliseconds>(endObjTime - startObjTime);
@@ -292,7 +350,14 @@ int main() {
     double frameTime = 0.0;
     std::cout << "Starting main loop..." << std::endl;
     auto startLoopTime = std::chrono::high_resolution_clock::now();
+    double T = 10.0;
+    int numSteps = static_cast<int>(T / dt);
+    std::vector<std::vector<glm::vec3>> positions;
+    positions.reserve(numSteps);
+    bool saved = false;
+    int numofFrames = 0;
     while (!glfwWindowShouldClose(window) && running == true) {
+        std::cout << "Frame: " << numofFrames << ", Delta Time: " << deltaTime << " s" << std::endl;
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -306,14 +371,14 @@ int main() {
             if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
                 // Increase mass by 1% per second
                 objs.back().mass *= 1.0 + 1.0 * deltaTime;
-                
+
                 // Update radius based on new mass
                 objs.back().radius = pow(
-                    (3 * objs.back().mass / objs.back().density) / 
-                    (4 * 3.14159265359f), 
-                    1.0f/3.0f
+                    (3 * objs.back().mass / objs.back().density) /
+                    (4 * 3.14159265359f),
+                    1.0f / 3.0f
                 ) / 100000.0f;
-                
+
                 // Update vertex data
                 objs.back().UpdateVertices();
             }
@@ -334,55 +399,75 @@ int main() {
 
         // Draw the triangle
         auto startNBodyTime = std::chrono::high_resolution_clock::now();
-        for(auto& obj : objs) {
-            glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+        //double dt[5] = { 1.0/47.0, 1.0 / 94.0, 1.0 / 188.0, 1.0 / 376.0, 1.0 / 752.0 };
 
-            for(auto& obj2 : objs){
-                if(&obj2 != &obj && !obj.Initalizing && !obj2.Initalizing){
-                    float dx = obj2.GetPos()[0] - obj.GetPos()[0];
-                    float dy = obj2.GetPos()[1] - obj.GetPos()[1];
-                    float dz = obj2.GetPos()[2] - obj.GetPos()[2];
-                    float distance = sqrt(dx * dx + dy * dy + dz * dz);
+            // One simulation step per rendered frame.
+            {
+                for (auto& obj : objs) {
+                    glUniform4f(objectColorLoc, obj.color.r, obj.color.g, obj.color.b, obj.color.a); //hạn chế sl đọc ghi
 
-                    if (distance > 0) {
-                        std::vector<float> direction = {dx / distance, dy / distance, dz / distance};
-                        distance *= 1000;
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
-                        
+                    for (auto& obj2 : objs) {
+                        if (&obj2 != &obj && !obj.Initalizing && !obj2.Initalizing) {
+                            float dx = obj2.GetPos()[0] - obj.GetPos()[0];
+                            float dy = obj2.GetPos()[1] - obj.GetPos()[1];
+                            float dz = obj2.GetPos()[2] - obj.GetPos()[2];
+                            float distance = sqrt(dx * dx + dy * dy + dz * dz);
 
-                        float acc1 = Gforce / obj.mass;
-                        std::vector<float> acc = {direction[0] * acc1, direction[1]*acc1, direction[2]*acc1};
-                        if(!pause){
-                            obj.accelerate(acc[0], acc[1], acc[2]);
+                            if (distance > 0) {
+                                std::vector<float> direction = { dx / distance, dy / distance, dz / distance };
+                                distance *= 1000;
+                                double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
+
+
+                                float acc1 = Gforce / obj.mass;
+                                std::vector<float> acc = { direction[0] * acc1, direction[1] * acc1, direction[2] * acc1 };
+                                if (!pause) {
+                                    obj.accelerate(acc[0], acc[1], acc[2], dt);
+                                }
+
+                                //collision
+                                obj.velocity *= obj.CheckCollision(obj2);
+                            }
                         }
+                    }
+                    if (obj.Initalizing) {
+                        obj.radius = pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
+                        obj.UpdateVertices();
+                    }
 
-                        //collision
-                        obj.velocity *= obj.CheckCollision(obj2);
+                    //update positions
+                    if (!pause) {
+                        obj.UpdatePos(dt);
+                    }
+
+                    glm::mat4 model = glm::mat4(1.0f);
+                    model = glm::translate(model, obj.position); // Apply position here
+                    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+                    glBindVertexArray(obj.VAO);
+                    glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
+
+                }
+
+                if (!pause && !saved)
+                {
+                    positions.emplace_back();
+                    for (auto& obj : objs)
+                    {
+                        positions.back().push_back(obj.GetPos());
+                    }
+                    if (static_cast<int>(positions.size()) >= numSteps)
+                    {
+                        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/baseline_positions.csv", positions, dt);
+                        saved = true;
                     }
                 }
             }
-            if(obj.Initalizing){
-                obj.radius = pow(((3 * obj.mass/obj.density)/(4 * 3.14159265359)), (1.0f/3.0f)) / 100000;
-                obj.UpdateVertices();
-            }
 
-            //update positions
-            if(!pause){
-                obj.UpdatePos();
-            }
-            
-            glm::mat4 model = glm::mat4(1.0f);
-            model = glm::translate(model, obj.position); // Apply position here
-            glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
-            glBindVertexArray(obj.VAO);
-            glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
-        }
+        auto endNBodyTime = std::chrono::high_resolution_clock::now();
+        std::cout << "N-body computation time: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime - startNBodyTime).count()
+            << " ms" << std::endl;
 
-		auto endNBodyTime = std::chrono::high_resolution_clock::now();
-		std::cout << "N-body computation time: "
-			<< std::chrono::duration_cast<std::chrono::milliseconds>(endNBodyTime - startNBodyTime).count()
-			<< " ms" << std::endl;
-        
         glfwSwapBuffers(window);
         glfwPollEvents();
 
@@ -398,6 +483,11 @@ int main() {
             startLoopTime = CurrentFrameTime;
             frameCount = 0;
         }
+        numofFrames++;
+
+    }
+    if (!saved && !positions.empty()) {
+        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/baseline_positions.csv", positions, dt);
     }
 
     for (auto& obj : objs) {
@@ -409,8 +499,6 @@ int main() {
     glDeleteBuffers(1, &gridVBO);
 
     glDeleteProgram(shaderProgram);
-    glfwTerminate();
-
     glfwTerminate();
     return 0;
 }
@@ -740,17 +828,3 @@ std::vector<float> CreateGridVertices(float size, int divisions, const std::vect
 
     return vertices;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
