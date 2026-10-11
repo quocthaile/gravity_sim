@@ -1,16 +1,17 @@
 #include "gpu_memory_manager.hpp"
 
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
-GpuBuffer::GpuBuffer(const GpuBufferDesc &desc) { Allocate(desc); }
+GpuBuffer::GpuBuffer(const GpuBufferDescription &bufferDescription) { Allocate(bufferDescription); }
 
 GpuBuffer::~GpuBuffer() { Reset(); }
 
 GpuBuffer::GpuBuffer(GpuBuffer &&other) noexcept
-    : desc_(other.desc_), handle_(other.handle_), mappedPtr_(other.mappedPtr_),
-      logicalCount_(other.logicalCount_)
+    : bufferDescription_(other.bufferDescription_), handle_(other.handle_),
+      mappedPtr_(other.mappedPtr_), logicalCount_(other.logicalCount_)
 {
     other.handle_ = 0;
     other.mappedPtr_ = nullptr;
@@ -22,7 +23,7 @@ GpuBuffer &GpuBuffer::operator=(GpuBuffer &&other) noexcept
     if (this != &other)
     {
         Reset();
-        desc_ = other.desc_;
+        bufferDescription_ = other.bufferDescription_;
         handle_ = other.handle_;
         mappedPtr_ = other.mappedPtr_;
         logicalCount_ = other.logicalCount_;
@@ -33,20 +34,27 @@ GpuBuffer &GpuBuffer::operator=(GpuBuffer &&other) noexcept
     return *this;
 }
 
-void GpuBuffer::Allocate(const GpuBufferDesc &desc)
+void GpuBuffer::Allocate(const GpuBufferDescription &bufferDescription)
 {
-    if (desc.elementSize == 0 || desc.capacity == 0)
+    if (bufferDescription.elementSize == 0 || bufferDescription.capacity == 0)
     {
         throw std::invalid_argument(
             "GpuBuffer element size and capacity must be greater than zero");
     }
-    if (desc.storageMode != GpuStorageMode::GpuResident)
+    if (bufferDescription.storageMode != GpuStorageMode::GpuResident)
     {
         throw std::invalid_argument("Unsupported GPU storage mode");
     }
+    if (bufferDescription.capacity >
+            std::numeric_limits<std::size_t>::max() / bufferDescription.elementSize ||
+        bufferDescription.capacity * bufferDescription.elementSize >
+            static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()))
+    {
+        throw std::length_error("GpuBuffer allocation size exceeds OpenGL limits");
+    }
 
     Reset();
-    desc_ = desc;
+    bufferDescription_ = bufferDescription;
     glGenBuffers(1, &handle_);
     AllocateStorage();
 }
@@ -55,56 +63,63 @@ void GpuBuffer::AllocateStorage()
 {
     GLbitfield storageFlags = GL_DYNAMIC_STORAGE_BIT;
     GLbitfield mappingFlags = 0;
-    if (desc_.mappingMode != MappingMode::None)
+    if (bufferDescription_.mappingMode != MappingMode::None)
     {
-        if (desc_.cpuAccess == CpuAccess::None)
+        if (bufferDescription_.cpuAccess == CpuAccess::None)
         {
             throw std::invalid_argument("Persistent mapping requires CPU access");
         }
-        if (desc_.cpuAccess == CpuAccess::Read || desc_.cpuAccess == CpuAccess::ReadWrite)
+        if (bufferDescription_.cpuAccess == CpuAccess::Read ||
+            bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
         {
             storageFlags |= GL_MAP_READ_BIT;
             mappingFlags |= GL_MAP_READ_BIT;
         }
-        if (desc_.cpuAccess == CpuAccess::Write || desc_.cpuAccess == CpuAccess::ReadWrite)
+        if (bufferDescription_.cpuAccess == CpuAccess::Write ||
+            bufferDescription_.cpuAccess == CpuAccess::ReadWrite)
         {
             storageFlags |= GL_MAP_WRITE_BIT;
             mappingFlags |= GL_MAP_WRITE_BIT;
         }
         storageFlags |= GL_MAP_PERSISTENT_BIT;
         mappingFlags |= GL_MAP_PERSISTENT_BIT;
-        if (desc_.mappingMode == MappingMode::PersistentCoherent)
+        if (bufferDescription_.mappingMode == MappingMode::PersistentCoherent)
         {
             storageFlags |= GL_MAP_COHERENT_BIT;
             mappingFlags |= GL_MAP_COHERENT_BIT;
         }
     }
 
-    glBindBuffer(desc_.target, handle_);
-    glBufferStorage(desc_.target, static_cast<GLsizeiptr>(AllocatedBytes()), nullptr, storageFlags);
-    if (desc_.mappingMode != MappingMode::None)
+    glBindBuffer(bufferDescription_.target, handle_);
+    glBufferStorage(bufferDescription_.target, static_cast<GLsizeiptr>(AllocatedBytes()), nullptr,
+                    storageFlags);
+    if (bufferDescription_.mappingMode != MappingMode::None)
     {
-        mappedPtr_ = glMapBufferRange(desc_.target, 0, static_cast<GLsizeiptr>(AllocatedBytes()),
-                                      mappingFlags);
+        mappedPtr_ = glMapBufferRange(bufferDescription_.target, 0,
+                                      static_cast<GLsizeiptr>(AllocatedBytes()), mappingFlags);
         if (mappedPtr_ == nullptr)
         {
-            glBindBuffer(desc_.target, 0);
+            glBindBuffer(bufferDescription_.target, 0);
             throw std::runtime_error("Unable to establish persistent GPU buffer mapping");
         }
     }
-    glBindBuffer(desc_.target, 0);
+    glBindBuffer(bufferDescription_.target, 0);
 }
 
 void GpuBuffer::Resize(std::size_t newCapacity)
 {
-    if (newCapacity == desc_.capacity)
+    if (newCapacity == 0)
+    {
+        throw std::invalid_argument("GpuBuffer capacity must be greater than zero");
+    }
+    if (newCapacity == bufferDescription_.capacity)
     {
         return;
     }
 
-    GpuBufferDesc replacementDesc = desc_;
-    replacementDesc.capacity = newCapacity;
-    GpuBuffer replacement(replacementDesc);
+    GpuBufferDescription replacementBufferDescription = bufferDescription_;
+    replacementBufferDescription.capacity = newCapacity;
+    GpuBuffer replacement(replacementBufferDescription);
     replacement.logicalCount_ = logicalCount_ > newCapacity ? newCapacity : logicalCount_;
     const std::size_t preservedBytes = replacement.LogicalBytes();
     if (preservedBytes != 0)
@@ -121,26 +136,40 @@ void GpuBuffer::Resize(std::size_t newCapacity)
 
 void GpuBuffer::Upload(const void *data, std::size_t byteCount, std::size_t byteOffset)
 {
-    if (byteOffset + byteCount > AllocatedBytes())
+    const std::size_t allocatedBytes = AllocatedBytes();
+    if (byteOffset > allocatedBytes || byteCount > allocatedBytes - byteOffset)
     {
         throw std::out_of_range("GpuBuffer upload exceeds allocated capacity");
     }
+    if (byteCount == 0)
+    {
+        return;
+    }
+    if (data == nullptr)
+    {
+        throw std::invalid_argument("GpuBuffer upload data must not be null");
+    }
 
-    if (mappedPtr_ != nullptr)
+    const bool cpuCanWrite = bufferDescription_.cpuAccess == CpuAccess::Write ||
+                             bufferDescription_.cpuAccess == CpuAccess::ReadWrite;
+    if (mappedPtr_ != nullptr && cpuCanWrite)
     {
         std::memcpy(static_cast<std::byte *>(mappedPtr_) + byteOffset, data, byteCount);
         return;
     }
 
-    glBindBuffer(desc_.target, handle_);
-    glBufferSubData(desc_.target, static_cast<GLintptr>(byteOffset),
+    glBindBuffer(bufferDescription_.target, handle_);
+    glBufferSubData(bufferDescription_.target, static_cast<GLintptr>(byteOffset),
                     static_cast<GLsizeiptr>(byteCount), data);
-    glBindBuffer(desc_.target, 0);
+    glBindBuffer(bufferDescription_.target, 0);
 }
 
-void GpuBuffer::BindBase() const { BindBase(BindingFor(desc_.role)); }
+void GpuBuffer::BindBase() const { BindBase(BindingFor(bufferDescription_.role)); }
 
-void GpuBuffer::BindBase(GLuint binding) const { glBindBufferBase(desc_.target, binding, handle_); }
+void GpuBuffer::BindBase(GLuint binding) const
+{
+    glBindBufferBase(bufferDescription_.target, binding, handle_);
+}
 
 void GpuBuffer::Reset()
 {
@@ -148,9 +177,9 @@ void GpuBuffer::Reset()
     {
         if (mappedPtr_ != nullptr)
         {
-            glBindBuffer(desc_.target, handle_);
-            glUnmapBuffer(desc_.target);
-            glBindBuffer(desc_.target, 0);
+            glBindBuffer(bufferDescription_.target, handle_);
+            glUnmapBuffer(bufferDescription_.target);
+            glBindBuffer(bufferDescription_.target, 0);
             mappedPtr_ = nullptr;
         }
         glDeleteBuffers(1, &handle_);
@@ -161,7 +190,7 @@ void GpuBuffer::Reset()
 
 void GpuBuffer::SetLogicalCount(std::size_t count)
 {
-    if (count > desc_.capacity)
+    if (count > bufferDescription_.capacity)
     {
         throw std::out_of_range("GpuBuffer logical count exceeds capacity");
     }
@@ -193,7 +222,12 @@ void GpuSynchronization::WaitForCpuWrite()
 void GpuSynchronization::FenceGpuCompletion()
 {
     Reset();
+    glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
     fence_ = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (fence_ == nullptr)
+    {
+        throw std::runtime_error("Unable to create GPU completion fence");
+    }
 }
 
 void GpuSynchronization::Reset()
@@ -205,14 +239,14 @@ void GpuSynchronization::Reset()
     }
 }
 
-GpuBuffer &GpuMemoryManager::Create(const GpuBufferDesc &desc)
+GpuBuffer &GpuMemoryManager::Create(const GpuBufferDescription &bufferDescription)
 {
-    if (buffers_.contains(desc.role))
+    if (buffers_.contains(bufferDescription.role))
     {
         throw std::invalid_argument("GPU buffer role already exists");
     }
 
-    auto [it, inserted] = buffers_.emplace(desc.role, GpuBuffer(desc));
+    auto [it, inserted] = buffers_.emplace(bufferDescription.role, GpuBuffer(bufferDescription));
     if (!inserted)
     {
         throw std::runtime_error("Unable to create GPU buffer");
@@ -223,7 +257,14 @@ GpuBuffer &GpuMemoryManager::Create(const GpuBufferDesc &desc)
     return it->second;
 }
 
-void GpuMemoryManager::Destroy(BufferRole role) { buffers_.erase(role); }
+void GpuMemoryManager::Destroy(BufferRole role)
+{
+    if (buffers_.contains(role))
+    {
+        WaitForCpuWrite();
+        buffers_.erase(role);
+    }
+}
 
 void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
 {
@@ -232,6 +273,7 @@ void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
     {
         return;
     }
+    WaitForCpuWrite();
     buffer.Resize(newCapacity);
     buffer.BindBase();
     ++reallocationCount_;
@@ -242,11 +284,26 @@ void GpuMemoryManager::Upload(BufferRole role, const void *data, std::size_t byt
                               std::size_t logicalCount, std::size_t byteOffset)
 {
     GpuBuffer &buffer = Get(role);
+    if (logicalCount > buffer.Capacity())
+    {
+        throw std::out_of_range("GPU buffer logical count exceeds capacity");
+    }
     buffer.Upload(data, byteCount, byteOffset);
     buffer.SetLogicalCount(logicalCount);
 }
 
 void GpuMemoryManager::Bind(BufferRole role) const { Get(role).BindBase(); }
+
+void GpuMemoryManager::SwapCurrentNext()
+{
+    GpuBuffer &currentState = Get(BufferRole::CurrentState);
+    GpuBuffer &nextState = Get(BufferRole::NextState);
+    std::swap(currentState, nextState);
+    currentState.SetRole(BufferRole::CurrentState);
+    nextState.SetRole(BufferRole::NextState);
+    currentState.BindBase();
+    nextState.BindBase();
+}
 
 void GpuMemoryManager::WaitForCpuWrite() { synchronization_.WaitForCpuWrite(); }
 
@@ -276,7 +333,7 @@ bool GpuMemoryManager::Contains(BufferRole role) const { return buffers_.contain
 
 void GpuMemoryManager::Shutdown()
 {
-    synchronization_.Reset();
+    synchronization_.WaitForCpuWrite();
     buffers_.clear();
     peakAllocatedBytes_ = 0;
     allocationCount_ = 0;

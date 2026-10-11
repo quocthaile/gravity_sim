@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -58,6 +60,8 @@ add_gravity_executable(gravity_sim_3Dgrid
     shaders/grid.vert
     shaders/grid.frag
     shaders/grid.comp
+    shaders/nbody.comp
+    shaders/integrate.comp
 )
 
 add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
@@ -67,6 +71,8 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.vert
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.frag
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/nbody.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/integrate.comp
         $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
 )
 
@@ -88,3 +94,20 @@ add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
 )
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
+
+if(BUILD_TESTING)
+    add_gravity_executable(gravity_sim_3Dgrid_phase2_validation
+        src/gravity_sim_3Dgrid_phase2_validation.cpp
+        src/gravity_sim_3Dgrid_function.cpp
+        src/gpu_memory_manager.cpp
+        shaders/nbody.comp
+        shaders/integrate.comp
+    )
+
+    add_test(NAME gravity_sim_3Dgrid_phase2_validation
+        COMMAND $<TARGET_FILE:gravity_sim_3Dgrid_phase2_validation>
+    )
+    set_tests_properties(gravity_sim_3Dgrid_phase2_validation PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()

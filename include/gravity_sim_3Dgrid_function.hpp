@@ -5,6 +5,8 @@
 #include <GLFW/glfw3.h>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -22,20 +24,31 @@ void SavePositions(const char* filename, const std::vector<std::vector<glm::vec3
 
 class Object;
 
+// Stable logical object identity used for validation/result matching. It is independent of the
+// object's vector index or GPU slot. 0 is reserved as "unassigned"; allocated IDs start at 1.
+constexpr std::uint32_t kInvalidObjectId = 0;
+std::uint32_t AllocateObjectId();
+
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
-void InitializeRenderingResources(GLuint &renderingShaderProgram, GLint &modelLocation,
-                                  GLint &objectColorLocation, GLint &viewLocation,
-                                  glm::vec3 &cameraPosition);
-GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource);
+void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram);
+void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
+                              GLint &objectColorLocation, GLint &viewLocation,
+                              glm::vec3 &cameraPosition);
+GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
+GLuint CreateComputeProgramFromFile(const std::string &filePath);
 void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
                        GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
 std::vector<glm::vec4> CreateBaseGridGPU();
-void RenderingPipeline(const std::vector<glm::vec4> &basePositions);
+void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
+                                      const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
-void InitializeGpuComputation();
+void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon, bool paused);
+void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused);
+void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
+                           size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
 void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram);
 void BeginFrame();
@@ -59,6 +72,8 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath = {},
 class Object
 {
   public:
+    // Identity (stable logical ID, not the vector index / GPU slot)
+    std::uint32_t id = kInvalidObjectId;
     // Rendering state
     GLuint VAO, VBO;
     glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
@@ -81,6 +96,7 @@ class Object
     // Constructor
     Object(glm::vec3 initPosition, glm::vec3 initVelocity, float mass, float density = 3344)
     {
+        this->id = AllocateObjectId();
         this->position = initPosition;
         this->velocity = initVelocity;
         this->mass = mass;
@@ -185,23 +201,36 @@ struct GpuObjectControl
     std::uint32_t initializing;
     std::uint32_t launched;
     std::uint32_t target;
-    std::uint32_t padding;
+    // Stable logical object ID (mirrors Object::id). Reuses the former padding slot so the
+    // struct stays 16 bytes and the std430 layout at binding 3 is unchanged.
+    std::uint32_t id;
 };
 
 struct GpuObjectAcceleration
 {
     glm::vec4 acceleration;
+    glm::vec4 velocityContribution;
+};
+
+struct GpuObjectRender
+{
+    glm::vec4 color;
 };
 
 static_assert(sizeof(GpuObjectState) == 2 * sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
-static_assert(sizeof(GpuObjectAcceleration) == sizeof(glm::vec4));
+static_assert(offsetof(GpuObjectControl, id) == 3 * sizeof(std::uint32_t));
+static_assert(sizeof(GpuObjectAcceleration) == 2 * sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);
-void UploadObjectState(size_t objectCount);
+void objectGpuState(size_t firstObject, size_t objectCount);
+void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount);
+void SynchronizeObjectControlState(size_t objectIndex);
+void UploadInitializingObjectState(size_t objectIndex);
 
 extern bool running;
 extern bool pause;
@@ -222,9 +251,7 @@ extern const GLuint kGridLocalSizeX;
 extern const GLuint kGridLocalSizeY;
 extern std::vector<Object> objs;
 extern GLuint gridVAO;
-extern GLuint gridVBO;
 extern GLuint gridEBO;
-extern GLuint gridComputeShaderProgram;
 extern GpuMemoryManager gpuMemoryManager;
 extern size_t gridNodeCount;
 extern size_t gridIndexCount;

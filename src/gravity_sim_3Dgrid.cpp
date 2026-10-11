@@ -29,9 +29,7 @@ float lastFrame = 0.0f;
 // OpenGL resources and simulation objects shared by the render loop and callbacks.
 std::vector<Object> objs = {};
 GLuint gridVAO = 0;
-GLuint gridVBO = 0;
 GLuint gridEBO = 0;
-GLuint gridComputeShaderProgram;
 GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
@@ -50,6 +48,9 @@ int main()
 {
     // Initialize OpenGL resources.
     GLuint renderingShaderProgram = 0;
+    GLuint computeShaderProgram = 0;
+    GLuint nbodyShaderProgram = 0;
+    GLuint integrateShaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
@@ -57,8 +58,10 @@ int main()
     GLFWwindow *window = StartGLU();
     if (window == nullptr)
     {
+        throw std::runtime_error("Failed to initialize GLFW and create a window.");
         return -1;
     }
+
     InitializeGlfwCallbacks(window);
     // Pass a file path here to load objects from CSV instead of using defaults.
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -83,12 +86,19 @@ int main()
     std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
     size_t objectCount = objs.size();
     std::cout << "Initial object count: " << objectCount << std::endl;
-    // Set up rendering resources, including shaders and camera position.
-    InitializeRenderingResources(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc,
-                                 cameraPos);
+    // Create shader programs, then initialize rendering uniforms and camera position.
+    CreateShaderProgram(renderingShaderProgram, computeShaderProgram);
+    nbodyShaderProgram = CreateComputeProgramFromFile("shaders/nbody.comp");
+    integrateShaderProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
+    InitializeRenderingState(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
-    InitializeGpuComputation();
+    std::vector<glm::vec4> gridVertices = CreateBaseGridGPU();
+    std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
+    // Create GPU buffers first: the grid VAO sources vertices directly from DeformedGrid.
+    ComputePipeline(gridVertices);
+    InitializeGridRenderingResources(gridVertices, gridIndices);
+
     auto endGridTime = std::chrono::high_resolution_clock::now();
     std::cout << "Grid initialization time: "
               << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
@@ -123,7 +133,6 @@ int main()
 
         BeginFrame();
         UpdateCamera(renderingShaderProgram, viewLoc, cameraPos);
-        UpdateInitializingObject(window);
 
         // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
@@ -203,13 +212,17 @@ int main()
         size_t checkObjectCount = objs.size();
         if (checkObjectCount != objectCount)
         {
-            objectCount = checkObjectCount;
-            ManageObjectStateBufferCapacity(objectCount);
+            SynchronizeObjectStateCount(objectCount, checkObjectCount);
         }
-        // Write CPU-authoritative object data directly into persistent mapped GPU storage.
-        UploadObjectState(objectCount);
-        // Run the compute shader to update the grid based on the current state of the objects.
-        RunGridCompute(gridComputeShaderProgram, objectCount);
+        UpdateInitializingObject(window);
+        if (!objs.empty() && objs.back().initializing)
+        {
+            SynchronizeObjectControlState(objs.size() - 1);
+        }
+
+        RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram, objectCount, epsilon,
+                              pause);
+        RunGridCompute(computeShaderProgram, objectCount);
         // Render the deformed grid and all objects in the scene.
         DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
@@ -227,6 +240,10 @@ int main()
             fps = frameCount / (frameDuration.count() / 1000.0);
             frameTime = 1.0 / fps;
             std::cout << "Object count: " << objectCount << std::endl;
+            std::cout << "CurrentState buffer: "
+                      << gpuMemoryManager.Get(BufferRole::CurrentState).Handle()
+                      << ", NextState buffer: "
+                      << gpuMemoryManager.Get(BufferRole::NextState).Handle() << std::endl;
             std::cout << "FPS: " << fps << std::endl
                       << "Frame Time: " << frameTime << " s" << std::endl;
             startLoopTime = CurrentFrameTime;
@@ -240,6 +257,8 @@ int main()
     }
     // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
-    Cleanup(renderingShaderProgram, gridComputeShaderProgram);
+    glDeleteProgram(nbodyShaderProgram);
+    glDeleteProgram(integrateShaderProgram);
+    Cleanup(renderingShaderProgram, computeShaderProgram);
     return 0;
 }
