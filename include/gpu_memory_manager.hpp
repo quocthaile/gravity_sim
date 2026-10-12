@@ -141,7 +141,7 @@ class GpuSynchronization
 {
   public:
     ~GpuSynchronization();
-    void WaitForCpuWrite();
+    void WaitForGpuCompletion();
     void FenceGpuCompletion();
     void Reset();
 
@@ -159,7 +159,7 @@ class GpuMemoryManager
                 std::size_t byteOffset = 0);
     void Bind(BufferRole role) const;
     void SwapCurrentNext();
-    void WaitForCpuWrite();
+    void WaitForGpuCompletion();
     void FenceGpuCompletion();
     GpuBuffer &Get(BufferRole role);
     const GpuBuffer &Get(BufferRole role) const;

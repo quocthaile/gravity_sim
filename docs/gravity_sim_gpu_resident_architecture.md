@@ -298,7 +298,7 @@ glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)
 ```
 
 - `glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` thiết lập dependency compute write -> vertex attribute fetch trên GPU.
-- `glFenceSync` (`FenceGpuCompletion` / `WaitForCpuWrite`) là GPU completion checkpoint cho CPU synchronization, tách biệt về khái niệm với memory barrier; cái này không thay thế cái kia.
+- `glFenceSync` (`FenceGpuCompletion` / `WaitForGpuCompletion`) là GPU completion checkpoint cho CPU synchronization, tách biệt về khái niệm với memory barrier; cái này không thay thế cái kia.
 - Per-object `Object::VAO/VBO` không liên quan và vẫn giữ nguyên.
 
 ---

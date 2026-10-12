@@ -1,6 +1,7 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -58,6 +59,66 @@ void Require(bool condition, const std::string &message)
     {
         throw std::runtime_error(message);
     }
+}
+
+void ValidateDrawnPosition(GLuint renderingProgram, const Object &object,
+                           const glm::vec3 &cpuPosition, const glm::vec3 &expectedPosition)
+{
+    const GLint modelLocation = glGetUniformLocation(renderingProgram, "model");
+    const GLint objectColorLocation = glGetUniformLocation(renderingProgram, "objectColor");
+    Require(modelLocation >= 0 && objectColorLocation >= 0,
+            "Rendering shader is missing an object uniform");
+
+    Object drawObject = object;
+    drawObject.position = cpuPosition;
+    glUseProgram(renderingProgram);
+    DrawObjects(std::vector<Object>{drawObject}, modelLocation, objectColorLocation);
+
+    GLfloat modelValues[16] = {};
+    GLfloat colorValues[4] = {};
+    glGetUniformfv(renderingProgram, modelLocation, modelValues);
+    glGetUniformfv(renderingProgram, objectColorLocation, colorValues);
+    const glm::vec3 drawnPosition(modelValues[12], modelValues[13], modelValues[14]);
+    const glm::vec4 drawnColor(colorValues[0], colorValues[1], colorValues[2], colorValues[3]);
+    Require(glm::length(drawnPosition - expectedPosition) <= 0.002f,
+            "DrawObjects did not use the expected object position");
+    Require(glm::length(drawnColor - object.color) <= 1.0e-6f,
+            "DrawObjects did not preserve CPU-side object color");
+}
+
+void ValidateDrawnPositions(GLuint renderingProgram,
+                            const std::vector<ReferenceObject> &referenceState)
+{
+    for (const Object &object : objs)
+    {
+        const auto reference = std::find_if(referenceState.begin(), referenceState.end(),
+                                            [&object](const ReferenceObject &candidate)
+                                            { return candidate.id == object.id; });
+        Require(reference != referenceState.end(), "Missing object in render-position oracle");
+        ValidateDrawnPosition(renderingProgram, object,
+                              glm::vec3(10000.0f + object.id, -20000.0f, 30000.0f),
+                              reference->position);
+    }
+}
+
+float MeasureFenceAndMappedPositionRead(size_t objectCount, std::chrono::nanoseconds &waitTotal,
+                                        std::chrono::nanoseconds &readTotal)
+{
+    const auto waitStart = std::chrono::steady_clock::now();
+    gpuMemoryManager.WaitForGpuCompletion();
+    const auto readStart = std::chrono::steady_clock::now();
+    waitTotal += readStart - waitStart;
+
+    const auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    Require(state != nullptr, "CurrentState mapping is unavailable during timing observation");
+    float positionChecksum = 0.0f;
+    for (size_t index = 0; index < objectCount; ++index)
+    {
+        positionChecksum +=
+            state[index].position.x + state[index].position.y + state[index].position.z;
+    }
+    readTotal += std::chrono::steady_clock::now() - readStart;
+    return positionChecksum;
 }
 
 std::vector<AccelerationSample> AdvanceReference(std::vector<ReferenceObject> &objects,
@@ -127,16 +188,17 @@ void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
         gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
     const auto *gpuAccelerations =
         gpuMemoryManager.Get(BufferRole::ObjectAcceleration).MappedPtr<GpuObjectAcceleration>();
-    const auto *gpuControls =
-        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
-    Require(gpuState != nullptr && gpuAccelerations != nullptr && gpuControls != nullptr,
+    Require(gpuState != nullptr && gpuAccelerations != nullptr,
             "Expected persistent mappings for GPU validation");
 
     std::unordered_map<std::uint32_t, size_t> gpuSlotById;
-    for (size_t slot = 0; slot < objs.size(); ++slot)
+    const size_t stateCount = gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
+    for (const Object &object : objs)
     {
-        Require(gpuSlotById.emplace(gpuControls[slot].id, slot).second,
-                "Duplicate GPU object ID in control buffer");
+        Require(object.gpuStateIndex < stateCount,
+                "Object-to-GPU-state mapping exceeds the logical state count");
+        Require(gpuSlotById.emplace(object.id, object.gpuStateIndex).second,
+                "Duplicate object ID in GPU state mapping");
     }
 
     std::unordered_map<std::uint32_t, const ReferenceObject *> referenceById;
@@ -187,7 +249,8 @@ void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
     Require(maxVelocityError <= 0.02f, "GPU velocity exceeded validation tolerance");
 }
 
-void ShutdownValidation(GLFWwindow *window, GLuint nbodyProgram, GLuint integrateProgram)
+void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbodyProgram,
+                        GLuint integrateProgram)
 {
     for (Object &object : objs)
     {
@@ -195,6 +258,7 @@ void ShutdownValidation(GLFWwindow *window, GLuint nbodyProgram, GLuint integrat
         glDeleteBuffers(1, &object.VBO);
     }
     gpuMemoryManager.Shutdown();
+    glDeleteProgram(renderingProgram);
     glDeleteProgram(nbodyProgram);
     glDeleteProgram(integrateProgram);
     if (window != nullptr)
@@ -209,6 +273,7 @@ void ShutdownValidation(GLFWwindow *window, GLuint nbodyProgram, GLuint integrat
 int main()
 {
     GLFWwindow *window = nullptr;
+    GLuint renderingProgram = 0;
     GLuint nbodyProgram = 0;
     GLuint integrateProgram = 0;
     try
@@ -236,13 +301,42 @@ int main()
                                       object.radius, object.initializing});
         }
 
+        const std::string vertexSource = LoadShaderSource("shaders/grid.vert");
+        const std::string fragmentSource = LoadShaderSource("shaders/grid.frag");
+        renderingProgram = CreateGraphicsProgram(vertexSource.c_str(), fragmentSource.c_str());
+        const GLint modelLocation = glGetUniformLocation(renderingProgram, "model");
+        const GLint objectColorLocation = glGetUniformLocation(renderingProgram, "objectColor");
+        Object cpuOnlyObject = objs.front();
+        const glm::vec3 fallbackPosition(17.0f, -23.0f, 41.0f);
+        ValidateDrawnPosition(renderingProgram, cpuOnlyObject, fallbackPosition, fallbackPosition);
+        DrawObjects(std::vector<Object>{}, modelLocation, objectColorLocation);
+
         ComputePipeline({glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)});
         objectGpuState(0, objs.size());
+        Object invalidStateObject = objs.front();
+        invalidStateObject.gpuStateIndex =
+            gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
+        bool invalidStateRejected = false;
+        try
+        {
+            DrawObjects(std::vector<Object>{invalidStateObject}, modelLocation,
+                        objectColorLocation);
+        }
+        catch (const std::out_of_range &)
+        {
+            invalidStateRejected = true;
+        }
+        Require(invalidStateRejected, "DrawObjects accepted an out-of-range GPU state slot");
         nbodyProgram = CreateComputeProgramFromFile("shaders/nbody.comp");
         integrateProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
 
         constexpr float epsilon = 10.0f;
         constexpr size_t validationSteps = 8;
+        size_t objectCount = objs.size();
+        std::chrono::nanoseconds totalFenceWait{};
+        std::chrono::nanoseconds totalMappedRead{};
+        size_t timingSamples = 0;
+        float positionChecksum = 0.0f;
         for (size_t step = 1; step <= validationSteps; ++step)
         {
             const std::vector<AccelerationSample> expectedAccelerations =
@@ -251,9 +345,8 @@ int main()
                 gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
             const GLuint nextHandleBefore = gpuMemoryManager.Get(BufferRole::NextState).Handle();
 
-            RunGpuStateTransition(nbodyProgram, integrateProgram, objs.size(), epsilon, false);
+            RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false);
             gpuMemoryManager.FenceGpuCompletion();
-            gpuMemoryManager.WaitForCpuWrite();
 
             Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == nextHandleBefore &&
                         gpuMemoryManager.Get(BufferRole::NextState).Handle() == currentHandleBefore,
@@ -266,20 +359,59 @@ int main()
                         static_cast<GLuint>(nextBinding) == currentHandleBefore,
                     "State swap did not rebind SSBO slots 0 and 1");
 
+            if (step > 1)
+            {
+                positionChecksum +=
+                    MeasureFenceAndMappedPositionRead(objectCount, totalFenceWait, totalMappedRead);
+                ++timingSamples;
+            }
+            ValidateDrawnPositions(renderingProgram, referenceState);
             ValidateGpuState(referenceState, expectedAccelerations, step);
         }
 
+        objs.emplace_back(glm::vec3(5.0f, 1.0f, -3.0f), glm::vec3(0.0f), 1.0e20f, 1000.0f);
+        objs.back().initializing = true;
+        SynchronizeObjectStateCount(objectCount, objs.size());
+        Require(objs.back().gpuStateIndex == objectCount - 1,
+                "Late-created object was not assigned a GPU state slot");
+        referenceState.push_back({objs.back().id, objs.back().position, objs.back().velocity,
+                                  objs.back().mass, objs.back().radius, objs.back().initializing});
+        const std::vector<AccelerationSample> expectedAccelerations =
+            AdvanceReference(referenceState, epsilon);
+        const GLuint currentHandleBefore = gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
+        const GLuint nextHandleBefore = gpuMemoryManager.Get(BufferRole::NextState).Handle();
+        RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false);
+        gpuMemoryManager.FenceGpuCompletion();
+        Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == nextHandleBefore &&
+                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == currentHandleBefore,
+                "CurrentState/NextState did not exchange after adding an object");
+        positionChecksum +=
+            MeasureFenceAndMappedPositionRead(objectCount, totalFenceWait, totalMappedRead);
+        ++timingSamples;
+        ValidateDrawnPositions(renderingProgram, referenceState);
+        ValidateGpuState(referenceState, expectedAccelerations, validationSteps + 1);
+
+        const double averageWaitMicroseconds =
+            std::chrono::duration<double, std::micro>(totalFenceWait).count() / timingSamples;
+        const double averageReadMicroseconds =
+            std::chrono::duration<double, std::micro>(totalMappedRead).count() / timingSamples;
+        std::cout << "Synchronization observation (" << timingSamples
+                  << " hidden-context samples): average fence wait=" << averageWaitMicroseconds
+                  << " us, mapped position read=" << averageReadMicroseconds
+                  << " us per state array, checksum=" << positionChecksum << std::endl;
+
         const GLenum glError = glGetError();
         Require(glError == GL_NO_ERROR, "OpenGL reported an error during GPU validation");
-        ShutdownValidation(window, nbodyProgram, integrateProgram);
-        std::cout << "Phase 2 GPU validation passed for acceleration and 8 state transitions."
-                  << std::endl;
+        ShutdownValidation(window, renderingProgram, nbodyProgram, integrateProgram);
+        std::cout
+            << "GPU validation passed for rendering positions, lifecycle, and 9 state transitions."
+            << std::endl;
         return 0;
     }
     catch (const std::exception &error)
     {
         std::cerr << "Phase 2 GPU validation failed: " << error.what() << std::endl;
-        ShutdownValidation(window, nbodyProgram, integrateProgram);
+        ShutdownValidation(window, renderingProgram, nbodyProgram, integrateProgram);
         return 1;
     }
 }

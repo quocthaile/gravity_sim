@@ -37,17 +37,19 @@ The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `G
 
 `GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `SynchronizeObjectControlState` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
 
+`Object::gpuStateIndex` records the exact per-object buffer slot assigned by `objectGpuState`. `DrawObjects()` uses that slot to read `Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>()`; it does not infer a slot from render-vector order or read IDs from the write-only `ObjectControl` mapping. Objects without an assigned slot retain the CPU-position path until materialized.
+
 The GPU slot `i` (the index into the per-object buffers, which currently equals the `objs` vector index) is a storage location, not an identity. Consumers must match objects by `id`, never by slot.
 
 ## Runtime state transition
 
-CPU `Object` data initializes GPU state and handles lifecycle/control events. During normal frames, `nbody.comp` reads logical `CurrentState`, physical data, control flags, and derived radii; `integrate.comp` reads the resulting acceleration and writes logical `NextState`; then `SwapCurrentNext()` changes the logical roles without copying state. The CPU does not mirror position or velocity each frame, and the normal loop does not upload the full object state.
+CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. During normal frames, `nbody.comp` reads logical `CurrentState`, physical data, control flags, and derived radii; `integrate.comp` reads the resulting acceleration and writes logical `NextState`; the shader-storage barrier orders those writes before subsequent shader access, then `SwapCurrentNext()` changes logical roles without copying state. `RunGridCompute()` consumes the newly active state, applies the vertex-fetch barrier for `DeformedGrid`, then `FenceGpuCompletion()` applies `GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT` and inserts a fence. Before model matrices are set, `DrawObjects()` waits for that fence and reads the mapped buffer currently returned by the `CurrentState` role. The CPU does not mirror positions into `Object::position` each frame.
 
 New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectControlState`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
 
 ## Synchronization and resizing
 
-Coherent mapping provides CPU/GPU visibility for mapped buffers; `GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT` orders CPU writes before the N-body dispatch. It does not grant simultaneous ownership of a region. `GpuSynchronization` inserts a `GLsync` fence after the grid GPU work. Before the CPU writes mapped object storage again, `WaitForCpuWrite` first performs a non-blocking readiness query and only waits if the GPU has not completed. Validation readback waits for GPU completion before reading `mappedPtr`; normal performance frames do not read back state.
+Coherent mapping provides visibility but does not grant simultaneous ownership of a region. The client-mapped barrier at the end-of-frame fence makes preceding shader writes visible to CPU mapped reads; the fence followed by `WaitForGpuCompletion()` establishes that those writes have completed before rendering or later CPU writes. The wait checks completion and retries finite waits on timeout; wait failure or an unexpected result throws, so incomplete state is never consumed as valid. Since the current fence is placed after `RunGridCompute()`, it also waits for grid work scheduled earlier in the frame.
 
 `glBufferStorage` is immutable. A capacity change creates a replacement `GpuBuffer`, establishes a replacement mapping when needed, preserves logical contents with a GPU copy, rebinds the semantic role, then releases the old resource. The old mapping is explicitly unmapped during replacement/reset/destruction.
 
@@ -60,11 +62,11 @@ BaseGrid + CurrentState/ObjectDerived -> grid.comp -> DeformedGrid
     -> glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT) -> gridVAO -> DrawGrid()
 ```
 
-`glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` establishes the GPU-side compute-write -> vertex-fetch dependency. `glFenceSync` (via `FenceGpuCompletion`/`WaitForCpuWrite`) is conceptually separate: it is a GPU completion checkpoint for CPU synchronization of mapped object storage, not a resource-visibility barrier, and neither replaces the other. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
+`glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)` establishes the GPU-side compute-write -> vertex-fetch dependency. `glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT)` establishes visibility of preceding shader writes to the CPU mapping, while `glFenceSync` and `WaitForGpuCompletion()` establish command completion before the CPU reads or writes that mapping. The barrier and fence have distinct roles; neither replaces the other. No `GL_ALL_BARRIER_BITS` or `glFinish` is used.
 
 ## Validation status
 
-`gravity_sim_3Dgrid_phase2_validation` creates a hidden OpenGL 4.4 context, compiles and links the N-body and integration shaders, checks acceleration and one-step/multi-step state against an independent snapshot-based CPU oracle by stable object ID, and verifies physical buffer handles and SSBO bindings exchange on every step. This validates the GPU transition and its synchronization path. It does not claim numerical equivalence to `src/gravity_sim_3Dgrid_baseline.cpp`: that legacy loop uses no epsilon softening and updates positions in vector order, while the GPU transition intentionally reads one immutable timestep snapshot. `DrawObjects()` remains CPU-driven and is outside this phase.
+`gravity_sim_3Dgrid_phase2_validation` creates a hidden OpenGL 4.4 context, compiles the compute and object-rendering shaders, checks acceleration and repeated state transitions against an independent CPU oracle, verifies physical buffer handles and SSBO bindings exchange, confirms the rendered model transform ignores deliberately stale CPU positions, and exercises CPU fallback and late object materialization. The draw-path check consumes the end-of-frame fence before examining the mapped current state. It does not claim numerical equivalence to `src/gravity_sim_3Dgrid_baseline.cpp`: that legacy loop uses no epsilon softening and updates positions in vector order, while the GPU transition intentionally reads one immutable timestep snapshot.
 
 ## Accounting
 

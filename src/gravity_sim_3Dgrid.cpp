@@ -97,6 +97,7 @@ int main()
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
     // Create GPU buffers first: the grid VAO sources vertices directly from DeformedGrid.
     ComputePipeline(gridVertices);
+    objectGpuState(0, objectCount);
     InitializeGridRenderingResources(gridVertices, gridIndices);
 
     auto endGridTime = std::chrono::high_resolution_clock::now();
@@ -191,7 +192,9 @@ int main()
                 }
                 if (static_cast<int>(positions.size()) >= numSteps)
                 {
-                    SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv", positions, dt);
+                    SavePositions(
+                        "E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv",
+                        positions, dt);
                     saved = true;
                 }
             }
@@ -253,7 +256,8 @@ int main()
     }
     if (!saved && !positions.empty())
     {
-        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv", positions, dt);
+        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv",
+                      positions, dt);
     }
     // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.

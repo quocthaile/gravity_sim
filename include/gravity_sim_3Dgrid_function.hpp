@@ -11,16 +11,18 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
 
 extern const double kGravitationalConstant;
-extern const float kSpeedOfLight;  //đổi từ float qua double
+extern const float kSpeedOfLight; // đổi từ float qua double
 
-//numerical error
-extern double;
-void SavePositions(const char* filename, const std::vector<std::vector<glm::vec3>>& positions, double dt);
+// numerical error
+extern double dt;
+void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
+                   double dt);
 
 class Object;
 
@@ -74,6 +76,8 @@ class Object
   public:
     // Identity (stable logical ID, not the vector index / GPU slot)
     std::uint32_t id = kInvalidObjectId;
+    // Set when this object is materialized in the GPU state buffers.
+    size_t gpuStateIndex = std::numeric_limits<size_t>::max();
     // Rendering state
     GLuint VAO, VBO;
     glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
@@ -89,7 +93,7 @@ class Object
     float mass;
     float density;
     // Derived state
-    float radius;  //đổi từ float qua double
+    float radius; // đổi từ float qua double
     float rs;
     // Auxiliary state
     glm::vec3 lastPos = position;
@@ -137,9 +141,9 @@ class Object
     }
     void UpdatePosition(double dt)
     {
-        //this->position[0] += this->velocity[0] / 94;
-        //this->position[1] += this->velocity[1] / 94;
-        //this->position[2] += this->velocity[2] / 94;
+        // this->position[0] += this->velocity[0] / 94;
+        // this->position[1] += this->velocity[1] / 94;
+        // this->position[2] += this->velocity[2] / 94;
         this->position[0] += this->velocity[0] * dt;
         this->position[1] += this->velocity[1] * dt;
         this->position[2] += this->velocity[2] * dt;
@@ -158,9 +162,9 @@ class Object
 
     void Accelerate(float x, float y, float z, double dt)
     {
-        //this->velocity[0] += x / 96;
-        //this->velocity[1] += y / 96;
-        //this->velocity[2] += z / 96;
+        // this->velocity[0] += x / 96;
+        // this->velocity[1] += y / 96;
+        // this->velocity[2] += z / 96;
         this->velocity[0] += x * dt;
         this->velocity[1] += y * dt;
         this->velocity[2] += z * dt;
@@ -243,7 +247,7 @@ extern float yaw;
 extern float pitch;
 extern float deltaTime;
 extern float lastFrame;
-extern float initMass;  //đổi từ float qua double
+extern float initMass; // đổi từ float qua double
 extern int numRandomObjects;
 extern float gridSize;
 extern int gridDivisions;
@@ -257,8 +261,7 @@ extern size_t gridNodeCount;
 extern size_t gridIndexCount;
 extern size_t objectStateCapacity;
 
-
-//mass aggregation
+// mass aggregation
 extern float CEll_SIZE;
 extern float worldMin;
 extern float worldMax;

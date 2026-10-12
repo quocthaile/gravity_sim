@@ -199,7 +199,7 @@ void GpuBuffer::SetLogicalCount(std::size_t count)
 
 GpuSynchronization::~GpuSynchronization() { Reset(); }
 
-void GpuSynchronization::WaitForCpuWrite()
+void GpuSynchronization::WaitForGpuCompletion()
 {
     if (fence_ == nullptr)
     {
@@ -207,13 +207,17 @@ void GpuSynchronization::WaitForCpuWrite()
     }
 
     GLenum result = glClientWaitSync(fence_, 0, 0);
-    if (result == GL_TIMEOUT_EXPIRED)
+    while (result == GL_TIMEOUT_EXPIRED)
     {
-        result = glClientWaitSync(fence_, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+        result = glClientWaitSync(fence_, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
     }
     if (result == GL_WAIT_FAILED)
     {
         throw std::runtime_error("GPU fence wait failed");
+    }
+    if (result != GL_ALREADY_SIGNALED && result != GL_CONDITION_SATISFIED)
+    {
+        throw std::runtime_error("GPU fence wait returned an unexpected result");
     }
     glDeleteSync(fence_);
     fence_ = nullptr;
@@ -261,7 +265,7 @@ void GpuMemoryManager::Destroy(BufferRole role)
 {
     if (buffers_.contains(role))
     {
-        WaitForCpuWrite();
+        WaitForGpuCompletion();
         buffers_.erase(role);
     }
 }
@@ -273,7 +277,7 @@ void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
     {
         return;
     }
-    WaitForCpuWrite();
+    WaitForGpuCompletion();
     buffer.Resize(newCapacity);
     buffer.BindBase();
     ++reallocationCount_;
@@ -305,7 +309,7 @@ void GpuMemoryManager::SwapCurrentNext()
     nextState.BindBase();
 }
 
-void GpuMemoryManager::WaitForCpuWrite() { synchronization_.WaitForCpuWrite(); }
+void GpuMemoryManager::WaitForGpuCompletion() { synchronization_.WaitForGpuCompletion(); }
 
 void GpuMemoryManager::FenceGpuCompletion() { synchronization_.FenceGpuCompletion(); }
 
@@ -333,7 +337,7 @@ bool GpuMemoryManager::Contains(BufferRole role) const { return buffers_.contain
 
 void GpuMemoryManager::Shutdown()
 {
-    synchronization_.WaitForCpuWrite();
+    synchronization_.WaitForGpuCompletion();
     buffers_.clear();
     peakAllocatedBytes_ = 0;
     allocationCount_ = 0;

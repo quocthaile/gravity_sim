@@ -1,19 +1,19 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 
+#include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#include <iomanip>
-#include <cstdint>
 
-void SavePositions(
-    const char* filename,
-    const std::vector<std::vector<glm::vec3>>& positions, double dt)
+void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
+                   double dt)
 {
     std::ofstream file(filename);
 
-    if (!file.is_open()) {
+    if (!file.is_open())
+    {
         std::cerr << "Cannot open file: " << filename << '\n';
         return;
     }
@@ -21,28 +21,25 @@ void SavePositions(
     file << "time,step,object_id,x,y,z\n";
     file << std::setprecision(10);
 
-    for (size_t step = 0; step < positions.size(); ++step) {
+    for (size_t step = 0; step < positions.size(); ++step)
+    {
         double simulationTime = static_cast<double>(step) * dt;
 
-        for (size_t objectId = 0;
-            objectId < positions[step].size();
-            ++objectId)
+        for (size_t objectId = 0; objectId < positions[step].size(); ++objectId)
         {
-            const auto& p = positions[step][objectId];
+            const auto &p = positions[step][objectId];
 
-            file << simulationTime << ','
-                << step << ','
-                << objectId << ','
-                << p.x << ','
-                << p.y << ','
-                << p.z << '\n';
+            file << simulationTime << ',' << step << ',' << objectId << ',' << p.x << ',' << p.y
+                 << ',' << p.z << '\n';
         }
     }
 
-    if (!file.good()) {
+    if (!file.good())
+    {
         std::cerr << "Error writing CSV: " << filename << '\n';
     }
-    else {
+    else
+    {
         std::cout << "Saved positions to " << filename << '\n';
     }
 }
@@ -373,7 +370,7 @@ void ManageObjectStateBufferCapacity(size_t objectCount)
         return;
     }
 
-    gpuMemoryManager.WaitForCpuWrite();
+    gpuMemoryManager.WaitForGpuCompletion();
     gpuMemoryManager.Resize(BufferRole::CurrentState, newCapacity);
     gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
     gpuMemoryManager.Resize(BufferRole::ObjectPhysical, newCapacity);
@@ -392,7 +389,7 @@ void objectGpuState(size_t firstObject, size_t objectCount)
         throw std::out_of_range("Object materialization range exceeds available objects/capacity");
     }
 
-    gpuMemoryManager.WaitForCpuWrite();
+    gpuMemoryManager.WaitForGpuCompletion();
     auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
     auto *physical =
         gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
@@ -413,7 +410,8 @@ void objectGpuState(size_t firstObject, size_t objectCount)
         GpuObjectAcceleration{glm::vec4(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)});
     for (size_t i = firstObject; i < objectCount; ++i)
     {
-        const Object &object = objs[i];
+        Object &object = objs[i];
+        object.gpuStateIndex = i;
         const GpuObjectState initialState = {glm::vec4(object.GetPosition(), 0.0f),
                                              glm::vec4(object.velocity, 0.0f)};
         state[i] = initialState;
@@ -490,7 +488,7 @@ void SynchronizeObjectControlState(size_t objectIndex)
         return;
     }
 
-    gpuMemoryManager.WaitForCpuWrite();
+    gpuMemoryManager.WaitForGpuCompletion();
     if (physicalChanged)
     {
         physical[objectIndex].massDensity = massDensity;
@@ -518,7 +516,7 @@ void UploadInitializingObjectState(size_t objectIndex)
         return;
     }
 
-    gpuMemoryManager.WaitForCpuWrite();
+    gpuMemoryManager.WaitForGpuCompletion();
     const Object &object = objs[objectIndex];
     const GpuObjectState state = {glm::vec4(object.GetPosition(), 0.0f),
                                   glm::vec4(object.velocity, 0.0f)};
@@ -927,11 +925,53 @@ void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
 
 void DrawObjects(const std::vector<Object> &objects, GLint modelLocation, GLint objectColorLocation)
 {
+    bool hasGpuStateObjects = false;
+    for (const Object &object : objects)
+    {
+        if (object.gpuStateIndex != std::numeric_limits<size_t>::max())
+        {
+            hasGpuStateObjects = true;
+            break;
+        }
+    }
+
+    const GpuObjectState *currentState = nullptr;
+    const GpuBuffer *currentStateBuffer = nullptr;
+    if (hasGpuStateObjects)
+    {
+        if (!gpuMemoryManager.Contains(BufferRole::CurrentState))
+        {
+            throw std::runtime_error("GPU-simulated objects have no CurrentState buffer");
+        }
+
+        currentStateBuffer = &gpuMemoryManager.Get(BufferRole::CurrentState);
+        if (!currentStateBuffer->IsMapped())
+        {
+            throw std::runtime_error("CurrentState must be persistently mapped for rendering");
+        }
+        gpuMemoryManager.WaitForGpuCompletion();
+        currentState = currentStateBuffer->MappedPtr<GpuObjectState>();
+        if (currentState == nullptr)
+        {
+            throw std::runtime_error("CurrentState mapped pointer is unavailable for rendering");
+        }
+    }
+
     for (const auto &obj : objects)
     {
         glUniform4f(objectColorLocation, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
         glm::mat4 model = glm::mat4(1.0f);
-        model = glm::translate(model, obj.position);
+        glm::vec3 renderPosition = obj.position;
+        if (obj.gpuStateIndex != std::numeric_limits<size_t>::max())
+        {
+            if (obj.gpuStateIndex >= currentStateBuffer->LogicalCount())
+            {
+                throw std::out_of_range(
+                    "Object GPU state index exceeds CurrentState logical count");
+            }
+            renderPosition = glm::vec3(currentState[obj.gpuStateIndex].position);
+        }
+        model = glm::translate(model, renderPosition);
         glUniformMatrix4fv(modelLocation, 1, GL_FALSE, glm::value_ptr(model));
         glBindVertexArray(obj.VAO);
         glDrawArrays(GL_TRIANGLES, 0, obj.vertexCount / 3);
@@ -1097,7 +1137,8 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
 //             static_cast<int>((obj.position.y + gridSize / 2.0f) / (gridSize / gridDivisions)),
 //             static_cast<int>((obj.position.z + gridSize / 2.0f) / (gridSize / gridDivisions)));
 //         cellIDs[i] = static_cast<GLuint>(cellIndex.x + cellIndex.y * (gridDivisions + 1) +
-//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions + 1));
+//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions +
+//                                           1));
 //     }
 
 //     glGenBuffers(1, &cellIDBuffer);
