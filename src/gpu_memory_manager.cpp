@@ -203,7 +203,7 @@ void GpuSynchronization::WaitForGpuCompletion()
 {
     if (fence_ == nullptr)
     {
-        return;
+        FenceGpuCompletion();
     }
 
     GLenum result = glClientWaitSync(fence_, 0, 0);

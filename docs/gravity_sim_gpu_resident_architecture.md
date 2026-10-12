@@ -800,156 +800,37 @@ Không yêu cầu bitwise equality giữa CPU và GPU vì floating-point operati
 
 ## 16. GPU object rendering
 
-Sau khi `CurrentState` trở thành runtime owner, `DrawObjects()` không nên tiếp tục lấy:
+**Implemented and tested:** object rendering now uses a single unit-sphere VAO/VBO and one instanced batch. The old per-object radius-scaled meshes and CPU-generated model matrices are removed.
+
+`objects.vert` reads the active `CurrentState` at SSBO binding 0, `ObjectDerived.radiusRs.x` at binding 12, and `ObjectRender.color` at binding 14. It transforms the shared local unit-sphere vertex by the per-object radius and GPU position. `Object::rs` remains physical metadata and was not used by the old object draw path; it is not substituted for visual radius.
 
 ```text
-obj.position
-obj.radius
-obj.color
+integration writes NextState
+    -> GL_SHADER_STORAGE_BARRIER_BIT
+    -> SwapCurrentNext() rebinds the active physical buffer at binding 0
+    -> RunGridCompute() and its unchanged grid vertex-fetch barrier
+    -> DrawObjects() binds the current logical roles
+    -> objects.vert reads state/scale/color using gl_InstanceID
+    -> glDrawArraysInstanced()
 ```
 
-từ CPU mỗi frame.
+There is no fence or CPU mapped-position read in the normal render path. The integration shader-storage barrier makes compute writes visible to later SSBO shader consumers; context command ordering keeps the draw after the state transition. The grid's separate `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT` remains unchanged.
 
-Thay vào đó dùng:
+## 17. DrawObjects() implementation
 
-```text
-CurrentState
-ObjectDerived
-ObjectRender
-ObjectControl
-```
+CPU validation checks the dense slot invariant and instance count, binds the current logical roles (`CurrentState` is not a fixed physical buffer), binds the shared sphere VAO, and submits one `glDrawArraysInstanced()` call. The vertex shader maps `gl_InstanceID` to the corresponding packed slot. `Object::gpuStateIndex` must equal its position in the live `objs` array; append-only creation materializes the new slot before the next draw. No removal or reorder path currently exists. Empty input produces no draw; invalid counts and slot ordering throw before submission.
 
-trực tiếp trên GPU.
-
-### Shared mesh
-
-Tạo một sphere mesh dùng chung, nên là unit sphere:
-
-```text
-one VAO
-one VBO
-one sphere mesh
-```
-
-Không tạo một VBO riêng cho từng object.
-
-### Instanced rendering
-
-Dùng:
-
-```cpp
-glDrawArraysInstanced(...)
-```
-
-hoặc `glDrawElementsInstanced(...)`.
-
-Mỗi instance tương ứng một object:
-
-```text
-gl_InstanceID = object index
-```
-
-Vertex shader đọc:
-
-```glsl
-CurrentState[objectIndex].position
-ObjectDerived[objectIndex].radiusRs.x
-ObjectRender[objectIndex].color
-```
-
-và tính world position:
-
-```text
-worldPosition =
-    unitSphereVertex * radius + position
-```
-
-Luồng:
-
-```text
-CurrentState
-     |
-     +---- position --------+
-                           |
-ObjectDerived              |
-     |                     |
-     +---- radius ---------+
-                           v
-                    Object Vertex Shader
-                           ^
-                           |
-ObjectRender --------------+
-                           |
-                           v
-                    Instanced draw
-                           |
-                           v
-                         Screen
-```
-
----
-
-## 17. DrawObjects() architecture mục tiêu
-
-CPU không còn:
-
-```text
-for each object
-    glBindVertexArray(object.VAO)
-    glUniformMatrix4fv(model)
-    glUniform4f(color)
-    glDrawArrays()
-```
-
-Thay bằng:
-
-```text
-Bind shared sphere VAO
-Bind CurrentState
-Bind ObjectDerived
-Bind ObjectRender
-Bind ObjectControl
-
-glDrawArraysInstanced(...)
-```
-
-Kết quả:
-
-```text
-N objects
-    |
-    v
-1 shared mesh
-    |
-    v
-1 instanced draw submission
-```
-
-`gl_InstanceID` xác định object index.
+`ObjectRender` and `ObjectDerived` remain separate from simulation state: color and scale are CPU-maintained mapped metadata, while position/velocity remain in ping-ponged `GpuObjectState`. Initializing objects render after their GPU slot has been initialized, with the same unit-sphere visual radius and color behavior.
 
 ---
 
 ## 18. ObjectControl trong rendering
 
-`ObjectControl` có thể được dùng để quyết định object có active hay không.
-
-Ví dụ conceptually:
-
-```text
-initializing
-launched
-target
-```
-
-là metadata/control được GPU shader đọc.
-
-Active-object compaction, indirect drawing hoặc free-list management là phần mở rộng riêng và không nên đưa vào bước đầu của GPU rendering.
+`ObjectControl` is not bound by the current object rendering shader. All objects in the valid packed `objs` range, including initializing objects, are rendered. Active-object filtering, compaction, indirect drawing, and free-list management are **deferred**; there is no removal workflow to validate today.
 
 ---
 
-## 19. Main loop mục tiêu
-
-Sau khi kiến trúc hoàn thiện:
+## 19. Main loop hiện tại
 
 ```cpp
 while (!windowShouldClose)
@@ -968,16 +849,9 @@ while (!windowShouldClose)
 
     RunGridCompute();
 
-    DrawGridGpu();
+    DrawGrid(...);
 
-    DrawObjectsGpu();
-
-    if (ValidationCheckpoint())
-    {
-        SynchronizeForCpuObservation();
-        ReadMappedState();
-        RunValidation();
-    }
+    DrawObjects(objectRenderingShaderProgram, objs);
 
     SwapBuffers();
     PollEvents();
@@ -987,17 +861,9 @@ while (!windowShouldClose)
 Đặc trưng:
 
 ```text
-Normal frame:
-    CPU control
-    GPU compute
-    GPU render
+Normal frame: CPU control -> GPU compute and ping-pong -> grid compute -> grid and instanced object draws.
 
-Validation frame:
-    CPU control
-    GPU compute
-    GPU render
-    synchronization
-    CPU observation
+Validation: the hidden-context test renders to an FBO, then synchronizes only for explicit mapped-state oracle reads.
 ```
 
 ---
@@ -1381,7 +1247,9 @@ Mỗi giai đoạn có invariant riêng, giảm số lượng thay đổi đồn
 
 ## 28. Implementation roadmap
 
-### Phase 1 — Complete GPU Memory
+Status note: the roadmap below uses repository-wide architecture stage numbers. GPU object rendering (stage 3 here) is the Phase 2 rendering milestone and is implemented in this revision.
+
+### Phase 1 — Complete GPU Memory — **Implemented and tested**
 
 Mục tiêu:
 
@@ -1406,7 +1274,7 @@ CPU Object fields
 GPU mapped fields
 ```
 
-### Phase 2 — Real CurrentState -> NextState transition
+### Phase 2 — Real CurrentState -> NextState transition — **Implemented and tested**
 
 Mục tiêu:
 
@@ -1431,7 +1299,7 @@ vs
 baseline trajectory
 ```
 
-### Phase 3 — GPU Object Rendering
+### Phase 3 — GPU Object Rendering — **Implemented and tested; rendering Phase 2**
 
 Mục tiêu:
 
@@ -1439,24 +1307,22 @@ Mục tiêu:
 GPU CurrentState -> screen
 ```
 
-Công việc:
+Công việc đã triển khai:
 
-- shared unit sphere mesh.
-- `ObjectRender` buffer.
-- object vertex shader.
-- instanced rendering.
-- GPU-based position/radius/color access.
-- remove per-object CPU draw loop from normal runtime.
+- Shared unit-sphere VAO/VBO and one instanced draw batch.
+- `ObjectRender` color and `ObjectDerived` visual radius.
+- Object vertex shader reading active `CurrentState` directly.
+- No per-object CPU draw loop or mapped position read in normal rendering.
 
-Verification:
+Verification — **tested** in the hidden OpenGL 4.4 framebuffer test for stale CPU positions, GPU scale/color, zero/one/multiple instances, ping-pong swaps, pause/resume, invalid slot rejection, and appended objects. Interactive camera inspection and large-scene comparison — **not tested**.
 
 ```text
-visual equivalence
+GPU-resident position correctness
 +
-rendering performance
+instanced draw performance
 ```
 
-### Phase 4 — Optimization Algorithms
+### Phase 4 — Optimization Algorithms — **Deferred**
 
 Sau infrastructure:
 

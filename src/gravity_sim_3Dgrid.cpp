@@ -49,11 +49,13 @@ int main()
     // Initialize OpenGL resources.
     GLuint renderingShaderProgram = 0;
     GLuint computeShaderProgram = 0;
+    GLuint objectRenderingShaderProgram = 0;
     GLuint nbodyShaderProgram = 0;
     GLuint integrateShaderProgram = 0;
     GLint modelLoc = -1;
     GLint objectColorLoc = -1;
     GLint viewLoc = -1;
+    GLint objectViewLoc = -1;
     // Initialize GLFW, create a window, and set up OpenGL context.
     GLFWwindow *window = StartGLU();
     if (window == nullptr)
@@ -88,9 +90,21 @@ int main()
     std::cout << "Initial object count: " << objectCount << std::endl;
     // Create shader programs, then initialize rendering uniforms and camera position.
     CreateShaderProgram(renderingShaderProgram, computeShaderProgram);
+    const std::string objectVertexSource = LoadShaderSource("shaders/objects.vert");
+    const std::string objectFragmentSource = LoadShaderSource("shaders/objects.frag");
+    objectRenderingShaderProgram =
+        CreateGraphicsProgram(objectVertexSource.c_str(), objectFragmentSource.c_str());
     nbodyShaderProgram = CreateComputeProgramFromFile("shaders/nbody.comp");
     integrateShaderProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
     InitializeRenderingState(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
+    glUseProgram(objectRenderingShaderProgram);
+    objectViewLoc = glGetUniformLocation(objectRenderingShaderProgram, "view");
+    const GLint objectProjectionLoc =
+        glGetUniformLocation(objectRenderingShaderProgram, "projection");
+    const glm::mat4 objectProjection =
+        glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
+    glUniformMatrix4fv(objectProjectionLoc, 1, GL_FALSE, glm::value_ptr(objectProjection));
+    InitializeObjectRenderingResources();
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
     std::vector<glm::vec4> gridVertices = CreateBaseGridGPU();
@@ -134,6 +148,7 @@ int main()
 
         BeginFrame();
         UpdateCamera(renderingShaderProgram, viewLoc, cameraPos);
+        UpdateCamera(objectRenderingShaderProgram, objectViewLoc, cameraPos);
 
         // N-body gravitational interactions between all objects in the simulation.
         float epsilon = 10.0f;
@@ -175,7 +190,6 @@ int main()
                     obj.radius =
                         pow(((3 * obj.mass / obj.density) / (4 * 3.14159265359)), (1.0f / 3.0f)) /
                         100000;
-                    obj.UpdateVertexBuffer();
                 }
                 if (!pause)
                 {
@@ -192,9 +206,7 @@ int main()
                 }
                 if (static_cast<int>(positions.size()) >= numSteps)
                 {
-                    SavePositions(
-                        "E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv",
-                        positions, dt);
+                    SavePositions("numerical_error/optimized_positions.csv", positions, dt);
                     saved = true;
                 }
             }
@@ -229,7 +241,7 @@ int main()
         // Render the deformed grid and all objects in the scene.
         DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
         // Render each object in the simulation.
-        DrawObjects(objs, modelLoc, objectColorLoc);
+        DrawObjects(objectRenderingShaderProgram, objs);
         // Swap buffers and poll for events.
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -256,13 +268,12 @@ int main()
     }
     if (!saved && !positions.empty())
     {
-        SavePositions("E:/UIT/KLTN/ver3/gravity_sim/numerical_error/optimized_positions.csv",
-                      positions, dt);
+        SavePositions("numerical_error/optimized_positions.csv", positions, dt);
     }
     // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
     glDeleteProgram(nbodyShaderProgram);
     glDeleteProgram(integrateShaderProgram);
-    Cleanup(renderingShaderProgram, computeShaderProgram);
+    Cleanup(renderingShaderProgram, computeShaderProgram, objectRenderingShaderProgram);
     return 0;
 }

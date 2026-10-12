@@ -62,6 +62,8 @@ add_gravity_executable(gravity_sim_3Dgrid
     shaders/grid.comp
     shaders/nbody.comp
     shaders/integrate.comp
+    shaders/objects.vert
+    shaders/objects.frag
 )
 
 add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
@@ -73,6 +75,8 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/nbody.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/integrate.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.vert
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.frag
         $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
 )
 

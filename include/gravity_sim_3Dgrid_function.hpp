@@ -37,6 +37,8 @@ void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderPr
 void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
                               GLint &objectColorLocation, GLint &viewLocation,
                               glm::vec3 &cameraPosition);
+void InitializeObjectRenderingResources();
+void DestroyObjectRenderingResources();
 GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource);
 GLuint CreateComputeProgram(const char *computeSource);
 GLuint CreateComputeProgramFromFile(const std::string &filePath);
@@ -52,7 +54,8 @@ void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
-void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram);
+void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram,
+             GLuint objectRenderingShaderProgram);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
 void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
@@ -64,8 +67,7 @@ void InitializeGlfwCallbacks(GLFWwindow *window);
 glm::vec3 SphericalToCartesian(float radius, float theta, float phi);
 void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
               GLint objectColorLocation);
-void DrawObjects(const std::vector<Object> &objects, GLint modelLocation,
-                 GLint objectColorLocation);
+void DrawObjects(GLuint objectRenderingShaderProgram, const std::vector<Object> &objects);
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
@@ -78,10 +80,8 @@ class Object
     std::uint32_t id = kInvalidObjectId;
     // Set when this object is materialized in the GPU state buffers.
     size_t gpuStateIndex = std::numeric_limits<size_t>::max();
-    // Rendering state
-    GLuint VAO, VBO;
+    // Rendering metadata
     glm::vec4 color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-    size_t vertexCount;
     // Simulation state
     glm::vec3 position = glm::vec3(400, 300, 0);
     glm::vec3 velocity = glm::vec3(0, 0, 0);
@@ -108,36 +108,6 @@ class Object
         this->radius =
             pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
         this->rs = (2 * kGravitationalConstant * this->mass) / (kSpeedOfLight * kSpeedOfLight);
-        std::vector<float> vertices = DrawSphereMesh();
-        vertexCount = vertices.size();
-        CreateMeshBuffers(VAO, VBO, vertices.data(), vertexCount);
-    }
-    std::vector<float> DrawSphereMesh()
-    {
-        std::vector<float> vertices;
-        int stacks = 10;
-        int sectors = 10;
-        for (float i = 0.0f; i <= stacks; ++i)
-        {
-            float theta1 = (i / stacks) * glm::pi<float>();
-            float theta2 = (i + 1) / stacks * glm::pi<float>();
-            for (float j = 0.0f; j < sectors; ++j)
-            {
-                float phi1 = j / sectors * 2 * glm::pi<float>();
-                float phi2 = (j + 1) / sectors * 2 * glm::pi<float>();
-                glm::vec3 v1 = SphericalToCartesian(radius, theta1, phi1);
-                glm::vec3 v2 = SphericalToCartesian(radius, theta1, phi2);
-                glm::vec3 v3 = SphericalToCartesian(radius, theta2, phi1);
-                glm::vec3 v4 = SphericalToCartesian(radius, theta2, phi2);
-                vertices.insert(vertices.end(), {v1.x, v1.y, v1.z});
-                vertices.insert(vertices.end(), {v2.x, v2.y, v2.z});
-                vertices.insert(vertices.end(), {v3.x, v3.y, v3.z});
-                vertices.insert(vertices.end(), {v2.x, v2.y, v2.z});
-                vertices.insert(vertices.end(), {v4.x, v4.y, v4.z});
-                vertices.insert(vertices.end(), {v3.x, v3.y, v3.z});
-            }
-        }
-        return vertices;
     }
     void UpdatePosition(double dt)
     {
@@ -150,14 +120,6 @@ class Object
         this->radius =
             pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
     }
-    void UpdateVertexBuffer()
-    {
-        std::vector<float> vertices = DrawSphereMesh();
-        glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(),
-                     GL_STATIC_DRAW);
-    }
-
     glm::vec3 GetPosition() const { return this->position; }
 
     void Accelerate(float x, float y, float z, double dt)
