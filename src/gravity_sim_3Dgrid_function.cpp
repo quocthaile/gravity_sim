@@ -1,5 +1,7 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -50,9 +52,26 @@ GLuint objectVAO = 0;
 GLuint objectVBO = 0;
 GLsizei objectVertexCount = 0;
 
-bool SameVec4(const glm::vec4 &left, const glm::vec4 &right)
+// Tolerances for float comparison: absolute for values near zero, relative for large magnitudes
+// (e.g. mass ~1e22) where a fixed absolute epsilon would be meaningless.
+constexpr float kFloatAbsEpsilon = 1e-6f;
+constexpr float kFloatRelEpsilon = 1e-5f;
+
+bool IsNearlyEqual(float left, float right)
 {
-    return left.x == right.x && left.y == right.y && left.z == right.z && left.w == right.w;
+    if (left == right) // Fast path; also handles matching infinities.
+    {
+        return true;
+    }
+    const float diff = std::fabs(left - right);
+    const float scale = std::max(std::fabs(left), std::fabs(right));
+    return diff <= std::max(kFloatAbsEpsilon, kFloatRelEpsilon * scale);
+}
+
+bool IsSameVec4(const glm::vec4 &left, const glm::vec4 &right)
+{
+    return IsNearlyEqual(left.x, right.x) && IsNearlyEqual(left.y, right.y) &&
+           IsNearlyEqual(left.z, right.z) && IsNearlyEqual(left.w, right.w);
 }
 } // namespace
 
@@ -494,7 +513,7 @@ void objectGpuState(size_t firstObject, size_t objectCount)
     gpuMemoryManager.Get(BufferRole::NextState).SetLogicalCount(objectCount);
 }
 
-void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount)
+void SynchronizeObjectStateBuffers(size_t &objectCount, size_t newObjectCount)
 {
     const size_t firstChangedObject = newObjectCount > objectCount ? objectCount : newObjectCount;
     objectCount = newObjectCount;
@@ -502,7 +521,7 @@ void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount)
     objectGpuState(firstChangedObject, objectCount);
 }
 
-void SynchronizeObjectControlState(size_t objectIndex)
+void SynchronizeObjectGpuProperties(size_t objectIndex)
 {
     if (objectIndex >= objs.size() || !gpuMemoryManager.Contains(BufferRole::ObjectControl) ||
         objectIndex >= gpuMemoryManager.Get(BufferRole::ObjectControl).LogicalCount())
@@ -526,13 +545,13 @@ void SynchronizeObjectControlState(size_t objectIndex)
     const GpuObjectControl objectControl = {static_cast<std::uint32_t>(object.initializing),
                                             static_cast<std::uint32_t>(object.launched),
                                             static_cast<std::uint32_t>(object.target), object.id};
-    const bool physicalChanged = !SameVec4(physical[objectIndex].massDensity, massDensity);
-    const bool derivedChanged = !SameVec4(derived[objectIndex].radiusRs, radiusRs);
+    const bool physicalChanged = !IsSameVec4(physical[objectIndex].massDensity, massDensity);
+    const bool derivedChanged = !IsSameVec4(derived[objectIndex].radiusRs, radiusRs);
     const bool controlChanged = control[objectIndex].initializing != objectControl.initializing ||
                                 control[objectIndex].launched != objectControl.launched ||
                                 control[objectIndex].target != objectControl.target ||
                                 control[objectIndex].id != objectControl.id;
-    const bool renderChanged = !SameVec4(render[objectIndex].color, object.color);
+    const bool renderChanged = !IsSameVec4(render[objectIndex].color, object.color);
     if (!physicalChanged && !derivedChanged && !controlChanged && !renderChanged)
     {
         return;
@@ -697,6 +716,26 @@ void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused
                  static_cast<GLuint>(paused));
     glDispatchCompute(groupCountX, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void RunObjectStateSync(GLFWwindow *window, size_t &objectCount)
+{
+    // 1. Update CPU-side properties of the object being created (mass/rs/radius).
+    UpdateInitializingObject(window);
+
+    // 2. Resize/materialize GPU object buffers when the object count changes.
+    const size_t currentObjectCount = objs.size();
+    if (currentObjectCount != objectCount)
+    {
+        SynchronizeObjectStateBuffers(objectCount, currentObjectCount);
+    }
+
+    // 3. Push the initializing object's properties to the GPU. Must run after step 2 because
+    //    SynchronizeObjectGpuProperties skips indices beyond the buffers' LogicalCount.
+    if (!objs.empty() && objs.back().initializing)
+    {
+        SynchronizeObjectGpuProperties(objs.size() - 1);
+    }
 }
 
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
@@ -928,7 +967,7 @@ void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
         {
             objs.back().initializing = false;
             objs.back().launched = true;
-            SynchronizeObjectControlState(objs.size() - 1);
+            SynchronizeObjectGpuProperties(objs.size() - 1);
         }
     }
 }
@@ -968,6 +1007,7 @@ void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
 
 void DrawObjects(GLuint objectRenderingShaderProgram, const std::vector<Object> &objects)
 {
+    // Check conditions before rendering to avoid OpenGL errors and ensure valid state.
     if (objects.empty())
     {
         return;
@@ -996,6 +1036,7 @@ void DrawObjects(GLuint objectRenderingShaderProgram, const std::vector<Object> 
     {
         throw std::out_of_range("Object instance count exceeds valid GPU records");
     }
+    // Check GPU state indices match the order of objects in the vector to ensure correct rendering.
     for (size_t index = 0; index < objects.size(); ++index)
     {
         if (objects[index].gpuStateIndex != index)

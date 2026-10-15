@@ -35,7 +35,7 @@ The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `G
 
 `Object::id` is a stable logical identity used for validation and baseline/GPU result matching. It is allocated by `AllocateObjectId()` (monotonic, starting at 1; 0 is reserved as unassigned) inside the `Object` constructor, so every creation path (CSV, default bodies, random orbiters, mouse-created objects) receives a unique ID that is deterministic within one run and is preserved by normal vector copy/move.
 
-`GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `SynchronizeObjectControlState` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
+`GpuObjectControl` carries the same value in its fourth `uint32` field (`id`, formerly padding). `objectGpuState` and `SynchronizeObjectGpuProperties` write `control[i].id = object.id`. The struct remains 16 bytes, so binding 3 layout and capacity accounting are unchanged.
 
 `Object::gpuStateIndex` records the exact packed per-object buffer slot assigned by `objectGpuState`. The application maintains `objs` and the GPU arrays as the same dense order: runtime additions append and are materialized before the next draw; no object removal/reordering operation currently exists. `DrawObjects()` checks this invariant and draws `gl_InstanceID == gpuStateIndex`. The vertex shader reads position from binding 0, visual radius from binding 12, and color from binding 14. It never reads `Object::position` or `mappedPtr`.
 
@@ -45,7 +45,7 @@ The GPU slot is a packed storage location, not an identity. CPU validation match
 
 CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. During normal frames, `nbody.comp` reads logical `CurrentState`; `integrate.comp` writes logical `NextState`; its `GL_SHADER_STORAGE_BARRIER_BIT` orders compute writes before later shader access, then `SwapCurrentNext()` changes logical roles and rebinds bindings 0/1. `RunGridCompute()` reads the newly active state and keeps its existing vertex-fetch barrier for `DeformedGrid`. `DrawObjects()` then explicitly binds the current logical role at SSBO binding 0 (plus `ObjectDerived` at 12 and `ObjectRender` at 14) and submits one instanced draw. The shader reads the new current state directly; no CPU position read or wait occurs in this frame path.
 
-New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectControlState`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
+New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectGpuProperties`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
 
 ## Synchronization and resizing
 

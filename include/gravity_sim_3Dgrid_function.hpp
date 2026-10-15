@@ -51,6 +51,7 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon, bool paused);
 void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused);
+void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
@@ -194,8 +195,8 @@ static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);
 void objectGpuState(size_t firstObject, size_t objectCount);
-void SynchronizeObjectStateCount(size_t &objectCount, size_t newObjectCount);
-void SynchronizeObjectControlState(size_t objectIndex);
+void SynchronizeObjectStateBuffers(size_t &objectCount, size_t newObjectCount);
+void SynchronizeObjectGpuProperties(size_t objectIndex);
 void UploadInitializingObjectState(size_t objectIndex);
 
 extern bool running;

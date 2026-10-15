@@ -448,7 +448,7 @@ int main()
             100000.0f;
         objs.back().color = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
         objs.back().initializing = true;
-        SynchronizeObjectStateCount(objectCount, objs.size());
+        SynchronizeObjectStateBuffers(objectCount, objs.size());
         Require(objs.back().gpuStateIndex == objectCount - 1,
                 "Late-created object was not assigned a GPU state slot");
         referenceState.push_back({objs.back().id, objs.back().position, objs.back().velocity,

@@ -223,18 +223,8 @@ int main()
                          .count()
                   << " ms" << std::endl;
 
-        // Upload CPU state, compute the grid on the GPU, then render both grid and objects.
-        size_t checkObjectCount = objs.size();
-        if (checkObjectCount != objectCount)
-        {
-            SynchronizeObjectStateCount(objectCount, checkObjectCount);
-        }
-        UpdateInitializingObject(window);
-        if (!objs.empty() && objs.back().initializing)
-        {
-            SynchronizeObjectControlState(objs.size() - 1);
-        }
-
+             
+        RunObjectStateSync(window, objectCount);
         RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram, objectCount, epsilon,
                               pause);
         RunGridCompute(computeShaderProgram, objectCount);
