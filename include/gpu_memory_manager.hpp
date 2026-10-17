@@ -22,6 +22,7 @@ enum class BufferRole : std::uint8_t
     ObjectDerived,
     ObjectAcceleration,
     ObjectRender,
+    ObjectCollision,
 };
 
 enum class GpuStorageMode : std::uint8_t
@@ -78,6 +79,8 @@ constexpr GLuint BindingFor(BufferRole role)
         return 13;
     case BufferRole::ObjectRender:
         return 14;
+    case BufferRole::ObjectCollision:
+        return 15;
     }
     return 0;
 }

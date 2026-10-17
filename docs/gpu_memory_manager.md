@@ -23,13 +23,48 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 | `LODMetadata` | 10 | GPU-only | Reserved |
 | `Metrics` | 11 | GPU-only | Reserved |
 | `ObjectDerived` | 12 | Persistent coherent CPU write | Radius and Schwarzschild radius; the vertex shader uses radius as visual scale |
-| `ObjectAcceleration` | 13 | Persistent coherent CPU observation | GPU acceleration plus ordered velocity contribution for collision-compatible integration |
+| `ObjectAcceleration` | 13 | Persistent coherent CPU observation | One `vec4 acceleration`: net gravity from the current snapshot; 16 bytes/body |
 | `ObjectRender` | 14 | Persistent coherent CPU write | Per-object color read by the vertex shader |
-| — | 15 | — | Reserved |
+| `ObjectCollision` | 15 | Persistent coherent CPU initialization and observation | One `uint32 overlapCount`; rewritten by N-body for every dispatched target; 4 bytes/body |
 
 `CurrentState` and `NextState` are logical roles, not permanent physical buffer identities. `GpuMemoryManager::SwapCurrentNext()` exchanges the owned buffers without copying storage, updates each buffer's role, and rebinds SSBO slots 0 and 1. Consequently `Get(CurrentState)` and its `MappedPtr` always resolve to the current timestep after a swap.
 
-The C++ and GLSL ABI uses vec4-aligned `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, and `GpuObjectRender` structures. Rendering uses one shared unit-sphere VAO/VBO; `Object` retains logical identity, visual color, simulation/control metadata, and its GPU slot, but no longer owns duplicate mesh resources.
+The C++ and GLSL ABI uses matching std430 records for `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, `GpuObjectCollision`, and `GpuObjectRender`. Rendering uses one shared unit-sphere VAO/VBO; `Object` retains logical identity, visual color, simulation/control metadata, and its GPU slot, but no longer owns duplicate mesh resources.
+
+### Per-object layouts and accounting
+
+| Structure / role | Layout | Bytes/body |
+| --- | --- | ---: |
+| `GpuObjectState` / `CurrentState` | `vec4 position` + `vec4 velocity` | 32 |
+| `GpuObjectState` / `NextState` | `vec4 position` + `vec4 velocity` | 32 |
+| `GpuObjectPhysical` | `vec4 massDensity` | 16 |
+| `GpuObjectDerived` | `vec4 radiusRs` | 16 |
+| `GpuObjectControl` | four `uint32` values | 16 |
+| `GpuObjectAcceleration` | `vec4 acceleration` | 16 |
+| `GpuObjectRender` | `vec4 color` | 16 |
+| `GpuObjectCollision` | `uint32 overlapCount` | 4 |
+| **Total** | Eight per-object buffers | **148** |
+
+`GpuObjectAcceleration` contains only net gravitational acceleration for the immutable
+`CurrentState` snapshot. With masses in kg, position/radius in the existing simulation-coordinate
+units, and the shader's distance conversion by 1000, acceleration is expressed in m/s^2. The
+collision record is independent: `overlapCount` counts other non-initializing objects for which
+the existing nonzero-distance test passes and `target.radius + source.radius > distance`.
+Self-interaction is excluded. Both records are overwritten for every valid target each N-body
+dispatch; initializing targets write zero to both, and new slots are initialized to zero before
+their first dispatch.
+
+Integration first computes `vGravity = vCurrent + acceleration / 96`, then applies the separate
+collision factor `(-0.2)^overlapCount` to that velocity, and advances position by `vNext / 94`.
+An odd count reverses sign; an even count preserves sign; the magnitude is `0.2^count` and can
+underflow to zero for sufficiently large counts. The response is now independent of source-loop
+ordering, but is not trajectory-equivalent to the former ordered collision-weighted accumulation.
+Paused and initializing records copy both state vectors exactly; while paused, N-body diagnostics
+are still calculated, whereas initializing targets write zero acceleration and collision output.
+
+The eight buffers therefore require 148 bytes per logical object and 148 bytes per capacity slot:
+37,888 bytes at capacity 256 and 75,776 bytes at capacity 512. This excludes grid/field storage and
+driver/allocation overhead and is not a measurement of physical VRAM residency.
 
 ### Object identity
 
@@ -43,9 +78,14 @@ The GPU slot is a packed storage location, not an identity. CPU validation match
 
 ## Runtime state transition
 
-CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. During normal frames, `nbody.comp` reads logical `CurrentState`; `integrate.comp` writes logical `NextState`; its `GL_SHADER_STORAGE_BARRIER_BIT` orders compute writes before later shader access, then `SwapCurrentNext()` changes logical roles and rebinds bindings 0/1. `RunGridCompute()` reads the newly active state and keeps its existing vertex-fetch barrier for `DeformedGrid`. `DrawObjects()` then explicitly binds the current logical role at SSBO binding 0 (plus `ObjectDerived` at 12 and `ObjectRender` at 14) and submits one instanced draw. The shader reads the new current state directly; no CPU position read or wait occurs in this frame path.
+CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. Each frame, `RunObjectStateSync()` processes initializing-object input, appends new objects when required, and synchronizes changed metadata before physics dispatch. During normal frames, `nbody.comp` reads logical `CurrentState`; `integrate.comp` writes logical `NextState`; its `GL_SHADER_STORAGE_BARRIER_BIT` orders compute writes before later shader access, then `SwapCurrentNext()` changes logical roles and rebinds bindings 0/1. `RunGridCompute()` reads the newly active state and keeps its existing vertex-fetch barrier for `DeformedGrid`. `DrawObjects()` then explicitly binds the current logical role at SSBO binding 0 (plus `ObjectDerived` at 12 and `ObjectRender` at 14) and submits one instanced draw. The shader reads the new current state directly; no CPU position read or wait occurs in the render path.
 
 New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectGpuProperties`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
+
+After materialization, CPU `Object::position` and `Object::velocity` are not continuously updated
+from or used instead of GPU runtime state. The optional trajectory CSV reads `CurrentState` through
+its mapped buffer after a completion checkpoint: one initial sample and one sample every 96
+simulation transitions, not a full readback on each frame.
 
 ## Synchronization and resizing
 
@@ -66,14 +106,27 @@ BaseGrid + CurrentState/ObjectDerived -> grid.comp -> DeformedGrid
 
 ## Validation status
 
-`gravity_sim_3Dgrid_phase2_validation` creates a hidden OpenGL 4.4 context, compiles and links the object shaders, renders into an offscreen framebuffer, checks GPU positions with deliberately stale CPU positions, verifies radius/color, exercises zero/one/multiple instances, eleven state transitions, pause/resume, and a late-created object, and checks the explicit packed-slot invariant. It also uses synchronized `mappedPtr` reads as a state oracle. The test does not claim numerical equivalence to `src/gravity_sim_3Dgrid_baseline.cpp`: that legacy loop uses no epsilon softening and updates positions in vector order, while the GPU transition intentionally reads one immutable timestep snapshot.
+The `gravity_sim_3Dgrid_phase2_validation` executable creates a hidden OpenGL 4.4 context, compiles
+and links the compute/render shaders, and renders into an offscreen framebuffer. It checks GPU
+positions with deliberately stale CPU positions, scale/color, zero/one/two instances, and invalid
+slots. Its independent snapshot CPU oracle covers two-body acceleration, zero interaction and
+zero-object dispatch, acceleration and overlap-count output, 8-step ping-pong, single/multiple
+collision parity, exact paused and initializing-state preservation, initializing exclusion and
+launch, append without resize, and growth from 256 to 512 with preservation and
+logical-count/capacity/binding checks across all eight per-object buffers.
+
+The oracle is only for shader/state-contract correctness. No trajectory equivalence or matched
+baseline result is claimed: the legacy baseline's force softening, integration, collision, and
+update-order semantics differ. Baseline comparison and performance measurement are separate work.
 
 ## Phase 2 Rendering Status
 
 - **Implemented:** one shared unit-sphere VAO/VBO, one `glDrawArraysInstanced()` batch, active-state SSBO lookup at binding 0, visual scale at binding 12, and color at binding 14.
-- **Tested:** shader link and offscreen pixel output for stale-CPU-position independence, scale/color, ping-pong state, zero/one/multiple instance counts, invalid slot rejection, runtime append/materialization, and pause/resume.
-- **Not tested:** interactive camera controls and visual inspection in the full application; large-scene performance relative to a controlled Phase 1 run; object removal, because no removal path exists.
-- **Deferred:** non-sphere geometry batches, compaction/indirect drawing, culling/LOD, and other Phase 3 work.
+- **Test coverage:** hidden-context FBO checks for GPU position, scale/color, stale CPU positions, invalid slots, and 0/1/2 instances; compute checks cover collision, pause/resume, init/launch, append, and capacity growth.
+- **Executed:** CMake GCC Release validation target build succeeded (`g++` 16.2.0, `-O3 -DNDEBUG`). Exact commands: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation` and `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe`. The executable exited 0 on OpenGL `4.4.0 - Build 32.0.101.7085`, `Intel(R) UHD Graphics` / `Intel`; 14 transitions and 14 oracle checkpoints passed. Maximum errors: acceleration `6.51856e-5 m/s^2`, relative acceleration `3.62458e-7`, collision count `0`, position `6.98493e-10` simulation units, and velocity `1.30119e-7` units. Its final GL error check passed.
+- **CTest blocker:** CMake Tools `RunCtest_CMakeTools` returned `Build failed` before test launch. Diagnostics identify the unchanged `src/gravity_sim_3Dgrid_baseline.cpp` error `'setprecision' is not a member of 'std'`; baseline remains unmodified. This does not invalidate the separately executed validation executable, but CTest itself is not marked passed.
+- **Not verified:** interactive camera/control behavior, full-application visual inspection, large-scene performance, or a matched baseline comparison. FBO checks use a hidden context and 128x128 target.
+- **Deferred:** Mass Accumulation, Gaussian Blur, Dynamic Grid/Field LOD, non-sphere geometry batches, compaction/indirect drawing, and culling/LOD.
 
 ## Accounting
 

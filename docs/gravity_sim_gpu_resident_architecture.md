@@ -104,6 +104,9 @@ Object
 ├── Acceleration
 │   └── acceleration
 │
+├── Collision output
+│   └── overlapCount
+│
 ├── Rendering
 │   └── color
 │
@@ -134,6 +137,9 @@ ObjectDerived
 
 ObjectAcceleration
     acceleration
+
+ObjectCollision
+    overlapCount
 
 ObjectControl
     initializing
@@ -251,6 +257,18 @@ GPU integration
 CPU validation/debug via mappedPtr
 ```
 
+`GpuObjectAcceleration` is exactly one `vec4 acceleration` (16 bytes). It contains net gravity
+from the current immutable snapshot only; collision response, pause handling, and integration
+scales are not folded into this record.
+
+### ObjectCollision
+
+Binding 15 stores `GpuObjectCollision { uint32_t overlapCount; }` (4 bytes). The N-body source loop
+counts non-self, non-initializing sources that pass the existing nonzero-distance check and radius
+sum test. It writes one record for every valid target on every dispatch; initializing targets write
+zero. New slots are also zero-initialized. OpenGL capability is checked before allocation because
+the implementation uses binding points 0 through 14 and requires binding 15 as well.
+
 ### ObjectControl
 
 ```text
@@ -324,6 +342,7 @@ GpuMemoryManager
  +--> ObjectDerived
  +--> ObjectControl
  +--> ObjectAcceleration
+ +--> ObjectCollision
  +--> ObjectRender
 ```
 
@@ -368,6 +387,7 @@ allocate/find GPU slot N
         +--> ObjectDerived[N]
         +--> ObjectControl[N]
         +--> ObjectAcceleration[N]
+        +--> ObjectCollision[N]
         +--> ObjectRender[N]
 ```
 
@@ -436,6 +456,7 @@ ObjectPhysical
 ObjectDerived
 ObjectControl
 ObjectAcceleration
+ObjectCollision
 ObjectRender
 ```
 
@@ -493,6 +514,39 @@ NextState
 ```
 
 Không ghi trực tiếp vào `CurrentState` trong cùng state transition nếu các invocation khác vẫn cần đọc timestep hiện tại.
+
+### Acceleration, collision, and integration contract
+
+Before separation, each N-body invocation accumulated `pairAcceleration` into a collision-weighted
+term in source-loop order: `weighted = (weighted + pairAcceleration) * scale`, while multiplying a
+velocity scale by `-0.2` for each overlap. Integration then used
+`velocity = currentVelocity * velocityScale + weighted / 96` and
+`position = currentPosition + velocity / 94`. This made gravity response depend on collision
+ordering, not just on the final net acceleration. Paused N-body still calculated raw acceleration,
+but emitted identity velocity terms so integration copied state. Initializing objects were excluded
+from gravity; the old integration could still move an initializing object with nonzero velocity.
+
+The current contract is:
+
+- Positions and radii use the existing simulation-coordinate units and are compared directly for
+    collision. Gravity converts pair distance to meters with `distance * 1000`; masses are kg,
+    `G = 6.6743e-11`, and `u_epsilon` is in meters (10 in the validation/runtime configuration).
+    `GpuObjectAcceleration.acceleration.xyz` is net gravity in m/s^2 only.
+- N-body counts non-self, non-initializing sources during the same source loop. As in the existing
+    shader, a zero-distance pair is skipped before both gravity and overlap checks; otherwise overlap
+    is the strict test `source.radius + target.radius > distance`.
+- Integration computes `vGravity = currentVelocity + acceleration / 96`, multiplies that whole
+    velocity by `(-0.2)^overlapCount`, then computes `nextPosition = currentPosition + nextVelocity / 94`.
+    Zero overlaps are identity; odd counts reverse velocity sign; even counts preserve sign. The
+    magnitude is `0.2^count`; float underflow can reduce it to zero at sufficiently high counts.
+    Counting during N-body avoids a second collision-detection pass and makes response independent
+    of source iteration order.
+- Pause leaves acceleration/collision diagnostics current but integration copies both `vec4` state
+    records exactly. An initializing target writes zero acceleration and count, is ignored as a source,
+    and has both state records copied exactly. Once initializing clears, it participates next step.
+- The legacy `/96` velocity and `/94` position scales, gravity constant, and softening semantics
+    are unchanged. The new response order is intentionally different from the former weighted sum;
+    no trajectory equivalence to the pre-refactor shader or independent baseline is claimed.
 
 ---
 
@@ -576,17 +630,18 @@ GPU tính:
 CurrentState + ObjectPhysical + ObjectControl
         |
         v
-ObjectAcceleration
+ObjectAcceleration + ObjectCollision
 ```
 
-Baseline/reference được dùng để so sánh acceleration.
+Shader correctness được kiểm tra với snapshot-based CPU oracle độc lập. Đây không phải là phép so
+sánh với `src/gravity_sim_3Dgrid_baseline.cpp`.
 
 ### Step C — GPU integration
 
 GPU thực hiện:
 
 ```text
-CurrentState + ObjectAcceleration
+CurrentState + ObjectAcceleration + ObjectCollision
         |
         v
 NextState
@@ -695,56 +750,30 @@ infrequent:
 
 ---
 
-## 14. Baseline và validation
+## 14. Baseline và validation methodology
 
-Baseline nằm độc lập:
+Baseline tiếp tục độc lập và không được chạy như CPU shadow state của GPU runtime:
 
 ```text
 src/gravity_sim_3Dgrid_baseline.cpp
 ```
 
-Baseline thực hiện Direct N-body theo implementation gốc của project.
+Ba loại output phải được giữ riêng:
 
-GPU path:
+1. **Shader correctness:** `gravity_sim_3Dgrid_phase2_validation` so sánh net gravitational
+    acceleration, collision overlap count, position và velocity của GPU với CPU oracle độc lập trên
+    cùng immutable timestep snapshot. Oracle tính pair interactions trên CPU rồi tích phân từ
+    acceleration/count riêng; baseline không được dùng làm oracle.
+2. **Baseline comparison:** là thí nghiệm riêng, chưa được thực hiện trong verification record bên
+   dưới. Chỉ ghép kết quả sau khi khóa initial conditions, object count, timestep, softening,
+   collision semantics, integration và update order. Không tuyên bố trajectory equivalence khi các
+   semantics đó khác nhau.
+3. **Performance measurements:** chạy riêng với cấu hình và workload đã ghi lại. Thời gian đo trong
+   validation executable chỉ là hidden-context harness observation, không phải benchmark GPU-vs-
+   baseline hoặc interactive performance.
 
-```text
-feat/gpu-memory
-```
-
-thực hiện implementation đang được phát triển.
-
-Hai configuration cần sử dụng cùng:
-
-```text
-initial conditions
-simulation parameters
-object count N
-timestep configuration
-hardware/software configuration
-```
-
-Validation concept:
-
-```text
-same initial condition
-        |
-        +--------------------+
-        |                    |
-        v                    v
-baseline implementation   GPU implementation
-        |                    |
-        v                    v
-reference result         GPU result
-        |                    |
-        +---------+----------+
-                  |
-                  v
-             error metrics
-```
-
-Baseline không cần chạy đồng thời như một CPU shadow copy của GPU simulation.
-
-Kết quả baseline và GPU được ghép theo `Object.id` / `GpuObjectControl.id`, không theo vector index hoặc GPU slot.
+Khi baseline comparison được thiết kế, kết quả được ghép bằng `Object.id` /
+`GpuObjectControl.id`, không dùng vector index hoặc GPU slot làm identity.
 
 ---
 
@@ -752,44 +781,46 @@ Kết quả baseline và GPU được ghép theo `Object.id` / `GpuObjectControl
 
 Các metric có thể dùng cho validation:
 
-### Acceleration error
+### GPU snapshot-oracle acceleration error
 
 \[
 e_a =
 \left\|
 \mathbf{a}^{GPU}
 -
-\mathbf{a}^{baseline}
+\mathbf{a}^{snapshot}
 \right\|
 \]
 
-### Position error
+### GPU snapshot-oracle position error
 
 \[
 e_p =
 \left\|
 \mathbf{x}^{GPU}
 -
-\mathbf{x}^{baseline}
+\mathbf{x}^{snapshot}
 \right\|
 \]
 
-### Velocity error
+### GPU snapshot-oracle velocity error
 
 \[
 e_v =
 \left\|
 \mathbf{v}^{GPU}
 -
-\mathbf{v}^{baseline}
+\mathbf{v}^{snapshot}
 \right\|
 \]
 
-Có thể sử dụng thêm relative error:
+Relative acceleration error được tính khi độ lớn acceleration tham chiếu đủ lớn; near-zero values
+được kiểm tra bằng absolute tolerance để tránh mẫu số giả tạo:
 
 \[
 e_{rel} =
-\frac{e}{\max(\|reference\|,\epsilon)}
+\frac{\|\mathbf{a}^{GPU}-\mathbf{a}^{snapshot}\|}
+{\|\mathbf{a}^{snapshot}\|}
 \]
 
 và tổng-energy drift theo methodology của đề tài.
@@ -800,7 +831,9 @@ Không yêu cầu bitwise equality giữa CPU và GPU vì floating-point operati
 
 ## 16. GPU object rendering
 
-**Implemented and tested:** object rendering now uses a single unit-sphere VAO/VBO and one instanced batch. The old per-object radius-scaled meshes and CPU-generated model matrices are removed.
+**Implemented:** object rendering uses one shared unit-sphere VAO/VBO and one instanced batch. Position,
+visual radius, and color are read by the vertex shader from GPU buffers; CPU `Object::position` is not
+the render source.
 
 `objects.vert` reads the active `CurrentState` at SSBO binding 0, `ObjectDerived.radiusRs.x` at binding 12, and `ObjectRender.color` at binding 14. It transforms the shared local unit-sphere vertex by the per-object radius and GPU position. `Object::rs` remains physical metadata and was not used by the old object draw path; it is not substituted for visual radius.
 
@@ -833,21 +866,18 @@ CPU validation checks the dense slot invariant and instance count, binds the cur
 ## 19. Main loop hiện tại
 
 ```cpp
-while (!windowShouldClose)
+while (!glfwWindowShouldClose(window) && running)
 {
     BeginFrame();
 
-    ProcessInput();
+    UpdateCamera(...);
 
-    ProcessObjectControlEvents();
+    RunObjectStateSync(window, objectCount);
 
-    RunNBodyCompute();
+    RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram,
+                          objectCount, epsilon, pause);
 
-    RunIntegration();
-
-    SwapCurrentNext();
-
-    RunGridCompute();
+    RunGridCompute(computeShaderProgram, objectCount);
 
     DrawGrid(...);
 
@@ -861,9 +891,11 @@ while (!windowShouldClose)
 Đặc trưng:
 
 ```text
-Normal frame: CPU control -> GPU compute and ping-pong -> grid compute -> grid and instanced object draws.
+Normal frame: camera/input callbacks -> CPU lifecycle and metadata synchronization -> GPU N-body + integration + ping-pong -> grid compute -> grid and instanced object draws.
 
-Validation: the hidden-context test renders to an FBO, then synchronizes only for explicit mapped-state oracle reads.
+Runtime object physics: GPU-owned; the main loop does not run CPU Direct N-body, collision response, `Object::UpdatePosition()`, or a CPU position/velocity shadow update.
+
+Trajectory export: one initial `CurrentState` sample and then one mapped GPU-state sample every 96 simulation transitions. Each sample waits for GPU completion; no full position readback is done each frame.
 ```
 
 ---
@@ -985,24 +1017,15 @@ ObjectPhysical      16 B/object
 ObjectDerived       16 B/object
 ObjectControl       16 B/object
 ObjectAcceleration  16 B/object
+ObjectRender        16 B/object
+ObjectCollision      4 B/object
 ```
 
-Tổng:
+`GpuObjectAcceleration` chỉ có `vec4 acceleration` (16 bytes); `GpuObjectCollision` chỉ có
+`uint32_t overlapCount` (4 bytes). Tổng logical per-object state:
 
 \[
-128\ \text{bytes/object}
-\]
-
-Nếu bổ sung:
-
-```text
-ObjectRender = 16 B/object
-```
-
-thì:
-
-\[
-144\ \text{bytes/object}
+148\ \text{bytes/object}
 \]
 
 Ví dụ, nếu chỉ xét các buffers này:
@@ -1011,13 +1034,14 @@ Ví dụ, nếu chỉ xét các buffers này:
 N = 1,000,000
 ```
 
-thì khoảng:
+thì logical storage là:
 
 \[
-144\times10^6 \approx 144\text{ MB}
+148\times10^6 = 148\text{ MB} \approx 141.1\text{ MiB}
 \]
 
-per-object allocation theo data layout trên, chưa bao gồm grid/field buffers, OpenGL resources và allocator/driver overhead.
+Với capacity 256, tám object buffers cấp phát tổng cộng 37,888 bytes. Capacity 512 tương ứng
+75,776 bytes. Các con số chưa gồm grid/field buffers, OpenGL resources và allocator/driver overhead.
 
 Đây là phép tính lý thuyết từ struct layout, không phải VRAM measurement.
 
@@ -1126,9 +1150,8 @@ VRAM
 
 ```text
 GPU simulation
-periodic CPU observation
-mappedPtr + synchronization
-comparison with baseline/reference
+mappedPtr + synchronization at explicit checkpoints
+comparison with snapshot CPU oracle
 ```
 
 Dùng để đo:
@@ -1137,10 +1160,10 @@ Dùng để đo:
 acceleration error
 position error
 velocity error
-energy drift
 ```
 
-Không gộp chi phí validation/readback vào mọi frame của performance benchmark nếu mục tiêu là đo GPU-resident runtime path.
+Baseline comparison là một output riêng với matched initial conditions/parameters; chưa được chạy ở
+Phase 2 verification bên dưới. Không gộp chi phí validation/readback vào performance benchmark.
 
 ---
 
@@ -1171,14 +1194,12 @@ GpuMemoryManager
 
 ### Accuracy
 
-GPU state được kiểm tra tại checkpoint với reference/baseline bằng:
+GPU state được kiểm tra tại checkpoint với snapshot CPU oracle bằng:
 
 ```text
 acceleration error
-field/state error
 position error
 velocity error
-energy drift
 ```
 
 ### Ablation
@@ -1206,6 +1227,57 @@ RAM / VRAM
 ```
 
 và tách validation overhead khỏi normal runtime path.
+
+---
+
+## 27. Phase 2 verification record
+
+### Implemented
+
+- Runtime position/velocity authority nằm trong `CurrentState` / `NextState`; CPU duplicate physics
+    đã được loại khỏi `gravity_sim_3Dgrid.cpp`.
+- CPU lifecycle/control events vẫn được đồng bộ trước state transition. `DrawObjects()` đọc state,
+    scale và color từ GPU buffers.
+- Trajectory output lấy mẫu từ GPU `CurrentState` lúc khởi tạo và mỗi 96 transition sau đó.
+- Khi pause, acceleration và collision count vẫn phản ánh snapshot hiện tại; integration copy chính
+    xác cả position và velocity. Initializing targets xuất acceleration/count bằng 0 và giữ nguyên
+    state cho tới khi được launch.
+
+### Test coverage
+
+Hidden OpenGL context + FBO coverage gồm two-body acceleration, zero interaction, zero-object
+dispatch, 8 bước ping-pong, overlap lẻ/chẵn, pause/resume với state GPU chính xác, initializing
+exclusion/state preservation và launch, append không resize, tăng capacity 256→512 với preservation/
+count/capacity/binding checks cho cả tám per-object buffers; ngoài ra còn GPU position/scale/color,
+invalid slot và 0/1/2 instances.
+
+### Executed verification
+
+- Fetched branch HEAD, initial HEAD, and final HEAD: `96e9ec746f1b1eca7fc0eb028c0cc59b7c35e39e`.
+- Build configuration: CMake `gcc-release`, Release (`g++` 16.2.0, `-O3 -DNDEBUG`). The focused
+    validation target build exited 0.
+- Build command: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation`.
+- Executable command: `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe` (exit 0).
+- Context: requested OpenGL 4.4; actual version `4.4.0 - Build 32.0.101.7085`; renderer
+    `Intel(R) UHD Graphics`; vendor `Intel`.
+- The executable passed 14 state transitions and 14 oracle checkpoints, ending at 257 logical
+    objects / 512 capacity. Maximum errors: acceleration `6.51856e-5 m/s^2`, relative acceleration
+    `3.62458e-7`, collision count `0`, position `6.98493e-10` simulation units, and velocity
+    `1.30119e-7` units. The executable's final `glGetError()` check passed; no assertions failed.
+- CMake Tools `RunCtest_CMakeTools` did not launch the test and returned `Build failed`. Its
+    diagnostics identify the unchanged baseline compile error in
+    `src/gravity_sim_3Dgrid_baseline.cpp`: `'setprecision' is not a member of 'std'`. The focused
+    target build and direct validation executable passed; CTest itself remains blocked by that
+    unrelated baseline target error. The baseline source was not changed.
+
+### Not verified / deferred
+
+- No matched-condition trajectory comparison with `gravity_sim_3Dgrid_baseline.cpp`; no trajectory
+    equivalence claim is made.
+- No interactive full-application visual inspection, camera/control validation, or large-scene
+    performance benchmark. The passing render assertions are hidden-context 128x128 FBO checks.
+- Mass Accumulation, Gaussian Blur, and Dynamic Grid/Field LOD remain deferred; Direct N-body remains
+    `O(N^2)`.
 
 ---
 
@@ -1294,10 +1366,12 @@ Công việc:
 Verification:
 
 ```text
-GPU trajectory
+GPU state transition
 vs
-baseline trajectory
+independent snapshot CPU oracle
 ```
+
+Baseline comparison is a separate experiment; trajectory equivalence is not claimed.
 
 ### Phase 3 — GPU Object Rendering — **Implemented and tested; rendering Phase 2**
 
@@ -1409,6 +1483,7 @@ GPU-RESIDENT OBJECT RUNTIME
 ├── ObjectPhysical
 ├── ObjectDerived
 ├── ObjectAcceleration
+├── ObjectCollision
 ├── ObjectControl
 └── ObjectRender
           |

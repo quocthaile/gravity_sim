@@ -29,7 +29,11 @@ struct ObjectDerived
 struct ObjectAcceleration
 {
     vec4 acceleration;
-    vec4 velocityContribution;
+};
+
+struct ObjectCollision
+{
+    uint overlapCount;
 };
 
 layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState objects[]; };
@@ -40,11 +44,14 @@ layout(std430, binding = 13) writeonly buffer ObjectAccelerationBuffer
 {
     ObjectAcceleration accelerations[];
 };
+layout(std430, binding = 15) writeonly buffer ObjectCollisionBuffer
+{
+    ObjectCollision collisions[];
+};
 
 uniform uint u_objectCount;
 uniform double u_gravitationalConstant;
 uniform float u_epsilon;
-uniform uint u_paused;
 
 void main()
 {
@@ -57,15 +64,14 @@ void main()
     if (controls[targetIndex].initializing != 0u)
     {
         accelerations[targetIndex].acceleration = vec4(0.0);
-        accelerations[targetIndex].velocityContribution = vec4(0.0, 0.0, 0.0, 1.0);
+        collisions[targetIndex].overlapCount = 0u;
         return;
     }
 
     vec3 targetPosition = objects[targetIndex].position.xyz;
     float targetMass = physical[targetIndex].massDensity.x;
     vec3 totalAcceleration = vec3(0.0);
-    vec3 weightedAcceleration = vec3(0.0);
-    float velocityScale = 1.0;
+    uint overlapCount = 0u;
 
     for (uint sourceIndex = 0u; sourceIndex < u_objectCount; ++sourceIndex)
     {
@@ -92,13 +98,12 @@ void main()
         vec3 pairAcceleration = direction * accelerationMagnitude;
         totalAcceleration += pairAcceleration;
 
-        float collisionScale =
-            derived[sourceIndex].radiusRs.x + derived[targetIndex].radiusRs.x > distance ? -0.2 : 1.0;
-        vec3 appliedAcceleration = u_paused == 0u ? pairAcceleration : vec3(0.0);
-        weightedAcceleration = (weightedAcceleration + appliedAcceleration) * collisionScale;
-        velocityScale *= collisionScale;
+        if (derived[sourceIndex].radiusRs.x + derived[targetIndex].radiusRs.x > distance)
+        {
+            overlapCount += 1u;
+        }
     }
 
     accelerations[targetIndex].acceleration = vec4(totalAcceleration, 0.0);
-    accelerations[targetIndex].velocityContribution = vec4(weightedAcceleration, velocityScale);
+    collisions[targetIndex].overlapCount = overlapCount;
 }

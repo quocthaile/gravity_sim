@@ -45,13 +45,61 @@ struct ReferenceObject
     float mass;
     float radius;
     bool initializing;
+    bool launched;
 };
 
 struct AccelerationSample
 {
     std::uint32_t id;
     glm::vec3 acceleration;
+    size_t collisionCount;
 };
+
+struct ValidationMetrics
+{
+    size_t checkpoints = 0;
+    size_t maxCollisionCountError = 0;
+    float maxAccelerationError = 0.0f;
+    float maxRelativeAccelerationError = 0.0f;
+    float maxPositionError = 0.0f;
+    float maxVelocityError = 0.0f;
+};
+
+void Require(bool condition, const std::string &message);
+
+template <typename T> std::vector<T> CopyMappedBuffer(BufferRole role, size_t count)
+{
+    const T *data = gpuMemoryManager.Get(role).MappedPtr<T>();
+    Require(data != nullptr, "Expected persistent mapping while preserving object state");
+    return std::vector<T>(data, data + count);
+}
+
+void ValidateObjectBufferLayout(size_t expectedCount)
+{
+    constexpr std::array objectRoles = {BufferRole::CurrentState,   BufferRole::NextState,
+                                        BufferRole::ObjectPhysical, BufferRole::ObjectDerived,
+                                        BufferRole::ObjectControl,  BufferRole::ObjectAcceleration,
+                                        BufferRole::ObjectRender,   BufferRole::ObjectCollision};
+    for (const BufferRole role : objectRoles)
+    {
+        const GpuBuffer &buffer = gpuMemoryManager.Get(role);
+        Require(buffer.LogicalCount() == expectedCount,
+                "Per-object logical counts diverged after append or resize");
+        Require(buffer.Capacity() == objectStateCapacity,
+                "Per-object buffer capacities diverged after append or resize");
+        GLint boundHandle = 0;
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, BindingFor(role), &boundHandle);
+        Require(static_cast<GLuint>(boundHandle) == buffer.Handle(),
+                "Per-object buffer is not bound at its semantic SSBO binding");
+    }
+}
+
+void RunCountedTransition(GLuint nbodyProgram, GLuint integrateProgram, size_t objectCount,
+                          float epsilon, bool paused, size_t &transitionCount)
+{
+    RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, paused);
+    ++transitionCount;
+}
 
 void Require(bool condition, const std::string &message)
 {
@@ -173,59 +221,76 @@ float MeasureFenceAndMappedPositionRead(size_t objectCount, std::chrono::nanosec
 }
 
 std::vector<AccelerationSample> AdvanceReference(std::vector<ReferenceObject> &objects,
-                                                 float epsilon)
+                                                 float epsilon, bool paused)
 {
     const std::vector<ReferenceObject> currentState = objects;
     std::vector<ReferenceObject> nextState = currentState;
+    std::vector<glm::vec3> totalAccelerations(currentState.size(), glm::vec3(0.0f));
+    std::vector<size_t> collisionCounts(currentState.size(), 0);
     std::vector<AccelerationSample> accelerations;
     accelerations.reserve(currentState.size());
+
+    // Compute snapshot gravity and overlap metadata separately; integration applies the response.
+    for (size_t targetIndex = 0; targetIndex < currentState.size(); ++targetIndex)
+    {
+        const ReferenceObject &target = currentState[targetIndex];
+        if (target.initializing)
+        {
+            continue;
+        }
+
+        for (size_t sourceIndex = 0; sourceIndex < currentState.size(); ++sourceIndex)
+        {
+            const ReferenceObject &source = currentState[sourceIndex];
+            if (sourceIndex == targetIndex || source.initializing)
+            {
+                continue;
+            }
+
+            const glm::vec3 displacement = source.position - target.position;
+            const float distance = glm::length(displacement);
+            if (distance <= 0.0f)
+            {
+                continue;
+            }
+
+            const float distanceMeters = distance * 1000.0f;
+            const float softenedDistanceSquared =
+                distanceMeters * distanceMeters + epsilon * epsilon;
+            const double gravitationalForce =
+                (kGravitationalConstant * static_cast<double>(target.mass) * source.mass) /
+                static_cast<double>(softenedDistanceSquared);
+            const float accelerationMagnitude =
+                static_cast<float>(gravitationalForce / static_cast<double>(target.mass));
+            const glm::vec3 pairAcceleration = displacement / distance * accelerationMagnitude;
+            const bool colliding = source.radius + target.radius > distance;
+            totalAccelerations[targetIndex] += pairAcceleration;
+            collisionCounts[targetIndex] += static_cast<size_t>(colliding);
+        }
+    }
 
     for (size_t targetIndex = 0; targetIndex < currentState.size(); ++targetIndex)
     {
         const ReferenceObject &target = currentState[targetIndex];
         glm::vec3 velocity = target.velocity;
-        glm::vec3 totalAcceleration(0.0f);
-
-        if (!target.initializing)
+        glm::vec3 position = target.position;
+        if (!target.initializing && !paused)
         {
-            for (size_t sourceIndex = 0; sourceIndex < currentState.size(); ++sourceIndex)
+            velocity += totalAccelerations[targetIndex] / 96.0f;
+            float collisionScale = 1.0f;
+            for (size_t overlapIndex = 0; overlapIndex < collisionCounts[targetIndex];
+                 ++overlapIndex)
             {
-                const ReferenceObject &source = currentState[sourceIndex];
-                if (sourceIndex == targetIndex || source.initializing)
-                {
-                    continue;
-                }
-
-                const float dx = source.position.x - target.position.x;
-                const float dy = source.position.y - target.position.y;
-                const float dz = source.position.z - target.position.z;
-                const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (distance <= 0.0f)
-                {
-                    continue;
-                }
-
-                const glm::vec3 direction(dx / distance, dy / distance, dz / distance);
-                const float distanceMeters = distance * 1000.0f;
-                const double gravitationalForce =
-                    (kGravitationalConstant * target.mass * source.mass) /
-                    (distanceMeters * distanceMeters + epsilon * epsilon);
-                const float accelerationMagnitude = gravitationalForce / target.mass;
-                const glm::vec3 pairAcceleration = direction * accelerationMagnitude;
-                totalAcceleration += pairAcceleration;
-                velocity.x += pairAcceleration.x / 96.0f;
-                velocity.y += pairAcceleration.y / 96.0f;
-                velocity.z += pairAcceleration.z / 96.0f;
-                if (source.radius + target.radius > distance)
-                {
-                    velocity *= -0.2f;
-                }
+                collisionScale *= -0.2f;
             }
+            velocity *= collisionScale;
+            position += velocity / 94.0f;
         }
 
         nextState[targetIndex].velocity = velocity;
-        nextState[targetIndex].position = target.position + velocity / 94.0f;
-        accelerations.push_back({target.id, totalAcceleration});
+        nextState[targetIndex].position = position;
+        accelerations.push_back(
+            {target.id, totalAccelerations[targetIndex], collisionCounts[targetIndex]});
     }
 
     objects = std::move(nextState);
@@ -233,14 +298,21 @@ std::vector<AccelerationSample> AdvanceReference(std::vector<ReferenceObject> &o
 }
 
 void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
-                      const std::vector<AccelerationSample> &referenceAccelerations, size_t step)
+                      const std::vector<AccelerationSample> &referenceAccelerations, size_t step,
+                      ValidationMetrics &metrics)
 {
+    constexpr float accelerationAbsoluteTolerance = 1.0e-4f; // m/s^2
+    constexpr float accelerationRelativeTolerance = 1.0e-3f;
+    constexpr float positionTolerance = 2.0e-3f; // simulation position units
+    constexpr float velocityTolerance = 2.0e-2f; // velocity units
     gpuMemoryManager.WaitForGpuCompletion();
     const auto *gpuState =
         gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
     const auto *gpuAccelerations =
         gpuMemoryManager.Get(BufferRole::ObjectAcceleration).MappedPtr<GpuObjectAcceleration>();
-    Require(gpuState != nullptr && gpuAccelerations != nullptr,
+    const auto *gpuCollisions =
+        gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+    Require(gpuState != nullptr && gpuAccelerations != nullptr && gpuCollisions != nullptr,
             "Expected persistent mappings for GPU validation");
 
     std::unordered_map<std::uint32_t, size_t> gpuSlotById;
@@ -259,16 +331,18 @@ void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
         referenceById.emplace(object.id, &object);
     }
 
-    std::unordered_map<std::uint32_t, glm::vec3> accelerationById;
+    std::unordered_map<std::uint32_t, AccelerationSample> accelerationById;
     for (const AccelerationSample &sample : referenceAccelerations)
     {
-        accelerationById.emplace(sample.id, sample.acceleration);
+        accelerationById.emplace(sample.id, sample);
     }
 
     float maxAccelerationError = 0.0f;
     float maxRelativeAccelerationError = 0.0f;
     float maxPositionError = 0.0f;
     float maxVelocityError = 0.0f;
+    size_t maxCollisionCountError = 0;
+    size_t relativeAccelerationSamples = 0;
     for (const auto &[objectId, referenceObject] : referenceById)
     {
         const auto gpuSlot = gpuSlotById.find(objectId);
@@ -276,29 +350,58 @@ void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
         const size_t slot = gpuSlot->second;
         const glm::vec3 actualPosition = glm::vec3(gpuState[slot].position);
         const glm::vec3 actualVelocity = glm::vec3(gpuState[slot].velocity);
-        const glm::vec3 actualAcceleration = glm::vec3(gpuAccelerations[slot].acceleration);
-        const glm::vec3 expectedAcceleration = accelerationById.at(objectId);
+        const GpuObjectAcceleration &actualAcceleration = gpuAccelerations[slot];
+        const GpuObjectCollision &actualCollision = gpuCollisions[slot];
+        const AccelerationSample &expected = accelerationById.at(objectId);
 
-        const float accelerationError = glm::length(actualAcceleration - expectedAcceleration);
-        const float expectedAccelerationLength = glm::length(expectedAcceleration);
+        const glm::vec3 actualAccelerationVector(actualAcceleration.acceleration);
+        const float accelerationError =
+            glm::length(actualAccelerationVector - expected.acceleration);
+        const float expectedAccelerationLength = glm::length(expected.acceleration);
         maxAccelerationError = std::max(maxAccelerationError, accelerationError);
-        maxRelativeAccelerationError =
-            std::max(maxRelativeAccelerationError,
-                     accelerationError / std::max(expectedAccelerationLength, 1.0e-6f));
+        if (expectedAccelerationLength >= 1.0e-6f)
+        {
+            maxRelativeAccelerationError = std::max(maxRelativeAccelerationError,
+                                                    accelerationError / expectedAccelerationLength);
+            ++relativeAccelerationSamples;
+        }
+        const size_t collisionCountError =
+            actualCollision.overlapCount > expected.collisionCount
+                ? actualCollision.overlapCount - expected.collisionCount
+                : expected.collisionCount - actualCollision.overlapCount;
+        maxCollisionCountError = std::max(maxCollisionCountError, collisionCountError);
         maxPositionError =
             std::max(maxPositionError, glm::length(actualPosition - referenceObject->position));
         maxVelocityError =
             std::max(maxVelocityError, glm::length(actualVelocity - referenceObject->velocity));
     }
 
-    std::cout << "GPU/CPU oracle checkpoint=" << step
-              << ", max acceleration error=" << maxAccelerationError
+    std::cout << "GPU/snapshot-oracle checkpoint=" << step
+              << ", max acceleration error=" << maxAccelerationError << " m/s^2"
               << ", max relative acceleration error=" << maxRelativeAccelerationError
-              << ", max position error=" << maxPositionError
-              << ", max velocity error=" << maxVelocityError << std::endl;
-    Require(maxAccelerationError <= 0.05f, "GPU acceleration exceeded validation tolerance");
-    Require(maxPositionError <= 0.002f, "GPU position exceeded validation tolerance");
-    Require(maxVelocityError <= 0.02f, "GPU velocity exceeded validation tolerance");
+              << " (samples=" << relativeAccelerationSamples << ')'
+              << ", max collision-count error=" << maxCollisionCountError
+              << ", max position error=" << maxPositionError << " units"
+              << ", max velocity error=" << maxVelocityError << " units" << std::endl;
+    Require(maxAccelerationError <= accelerationAbsoluteTolerance,
+            "GPU acceleration exceeded absolute validation tolerance");
+    if (relativeAccelerationSamples > 0)
+    {
+        Require(maxRelativeAccelerationError <= accelerationRelativeTolerance,
+                "GPU acceleration exceeded relative validation tolerance");
+    }
+    Require(maxCollisionCountError == 0,
+            "GPU collision overlap count did not match the snapshot oracle");
+    Require(maxPositionError <= positionTolerance, "GPU position exceeded validation tolerance");
+    Require(maxVelocityError <= velocityTolerance, "GPU velocity exceeded validation tolerance");
+    ++metrics.checkpoints;
+    metrics.maxCollisionCountError =
+        std::max(metrics.maxCollisionCountError, maxCollisionCountError);
+    metrics.maxAccelerationError = std::max(metrics.maxAccelerationError, maxAccelerationError);
+    metrics.maxRelativeAccelerationError =
+        std::max(metrics.maxRelativeAccelerationError, maxRelativeAccelerationError);
+    metrics.maxPositionError = std::max(metrics.maxPositionError, maxPositionError);
+    metrics.maxVelocityError = std::max(metrics.maxVelocityError, maxVelocityError);
 }
 
 void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbodyProgram,
@@ -330,6 +433,12 @@ int main()
     GLuint integrateProgram = 0;
     try
     {
+#if defined(NDEBUG)
+        constexpr const char *buildConfiguration = "Release";
+#else
+        constexpr const char *buildConfiguration = "Debug";
+#endif
+        std::cout << "Validation build configuration: " << buildConfiguration << std::endl;
         Require(glfwInit() == GLFW_TRUE, "Unable to initialize GLFW for GPU validation");
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -342,6 +451,11 @@ int main()
         Require(glewInit() == GLEW_OK, "Unable to initialize GLEW for GPU validation");
         (void)glGetError();
         Require(GLEW_VERSION_4_4 == GL_TRUE, "GPU validation requires OpenGL 4.4");
+        std::cout << "OpenGL context: requested=4.4, version="
+                  << reinterpret_cast<const char *>(glGetString(GL_VERSION))
+                  << ", renderer=" << reinterpret_cast<const char *>(glGetString(GL_RENDERER))
+                  << ", vendor=" << reinterpret_cast<const char *>(glGetString(GL_VENDOR))
+                  << std::endl;
 
         objs.emplace_back(glm::vec3(-0.55f, 0.0f, 0.0f), glm::vec3(0.0f), 1.0e16f, 1000.0f);
         objs.emplace_back(glm::vec3(0.55f, 0.0f, 0.0f), glm::vec3(0.0f), 1.0e16f, 1000.0f);
@@ -352,7 +466,7 @@ int main()
         for (const Object &object : objs)
         {
             referenceState.push_back({object.id, object.position, object.velocity, object.mass,
-                                      object.radius, object.initializing});
+                                      object.radius, object.initializing, object.launched});
         }
 
         const std::string vertexSource = LoadShaderSource("shaders/objects.vert");
@@ -378,8 +492,11 @@ int main()
 
         ComputePipeline({glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)});
         objectGpuState(0, objs.size());
+        ValidateObjectBufferLayout(objs.size());
         RenderMetrics renderMetrics;
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 2,
                                    renderMetrics);
         Object invalidStateObject = objs.front();
         invalidStateObject.gpuStateIndex =
@@ -399,21 +516,68 @@ int main()
         integrateProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
 
         constexpr float epsilon = 10.0f;
+        const GLuint currentHandleBeforeZeroDispatch =
+            gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
+        const GLuint nextHandleBeforeZeroDispatch =
+            gpuMemoryManager.Get(BufferRole::NextState).Handle();
+        RunGpuStateTransition(nbodyProgram, integrateProgram, 0, epsilon, false);
+        Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() ==
+                        currentHandleBeforeZeroDispatch &&
+                    gpuMemoryManager.Get(BufferRole::NextState).Handle() ==
+                        nextHandleBeforeZeroDispatch,
+                "Zero-object dispatch changed the ping-pong state roles");
         constexpr size_t validationSteps = 8;
         size_t objectCount = objs.size();
+        size_t transitionCount = 0;
+        ValidationMetrics validationMetrics;
         std::chrono::nanoseconds totalFenceWait{};
         std::chrono::nanoseconds totalMappedRead{};
         size_t timingSamples = 0;
         float positionChecksum = 0.0f;
+
+        for (size_t objectIndex = 0; objectIndex < objs.size(); ++objectIndex)
+        {
+            objs[objectIndex].initializing = true;
+            referenceState[objectIndex].initializing = true;
+            SynchronizeObjectGpuProperties(objectIndex);
+        }
+        const std::vector<AccelerationSample> zeroInteractionAccelerations =
+            AdvanceReference(referenceState, epsilon, false);
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                             transitionCount);
+        ValidateGpuState(referenceState, zeroInteractionAccelerations, transitionCount,
+                         validationMetrics);
+        const auto *zeroInteractionCollision =
+            gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+        for (size_t index = 0; index < objectCount; ++index)
+        {
+            Require(glm::length(zeroInteractionAccelerations[index].acceleration) == 0.0f &&
+                        zeroInteractionCollision[index].overlapCount == 0u,
+                    "Initializing objects produced gravity or collision output");
+            objs[index].initializing = false;
+            referenceState[index].initializing = false;
+            SynchronizeObjectGpuProperties(index);
+        }
+
         for (size_t step = 1; step <= validationSteps; ++step)
         {
+            const glm::vec3 initialVelocity = referenceState.front().velocity;
             const std::vector<AccelerationSample> expectedAccelerations =
-                AdvanceReference(referenceState, epsilon);
+                AdvanceReference(referenceState, epsilon, false);
+            if (step == 1)
+            {
+                Require(expectedAccelerations.front().collisionCount == 0 &&
+                            expectedAccelerations.back().collisionCount == 0,
+                        "Separated two-body gravity scenario unexpectedly overlaps");
+                Require(glm::length(expectedAccelerations.front().acceleration) > 0.0f,
+                        "Two-body gravity scenario produced no acceleration");
+            }
             const GLuint currentHandleBefore =
                 gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
             const GLuint nextHandleBefore = gpuMemoryManager.Get(BufferRole::NextState).Handle();
 
-            RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false);
+            RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                                 transitionCount);
             gpuMemoryManager.FenceGpuCompletion();
 
             Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == nextHandleBefore &&
@@ -433,72 +597,278 @@ int main()
                     MeasureFenceAndMappedPositionRead(objectCount, totalFenceWait, totalMappedRead);
                 ++timingSamples;
             }
-            ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState,
-                                       objs.size(), renderMetrics);
-            ValidateGpuState(referenceState, expectedAccelerations, step);
+            ValidateObjectBufferLayout(objectCount);
+            ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                       renderMetrics);
+            ValidateGpuState(referenceState, expectedAccelerations, step, validationMetrics);
+            if (step == 1)
+            {
+                const auto *state =
+                    gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+                const auto *accelerations = gpuMemoryManager.Get(BufferRole::ObjectAcceleration)
+                                                .MappedPtr<GpuObjectAcceleration>();
+                const auto *collisions = gpuMemoryManager.Get(BufferRole::ObjectCollision)
+                                             .MappedPtr<GpuObjectCollision>();
+                const glm::vec3 velocityDelta = glm::vec3(state[0].velocity) - initialVelocity;
+                Require(glm::dot(velocityDelta, expectedAccelerations[0].acceleration) > 0.0f,
+                        "Two-body gravity did not accelerate along the force direction");
+                Require(collisions[0].overlapCount == 0u && collisions[1].overlapCount == 0u,
+                        "Separated bodies unexpectedly produced collision output");
+                Require(sizeof(accelerations[0]) == 16,
+                        "Acceleration record is not the required 16-byte layout");
+            }
         }
 
-        objs.emplace_back(glm::vec3(5.0f, 1.0f, -3.0f), glm::vec3(0.0f), 1.0e20f, 1000.0f);
-        objs.back().position = glm::vec3(0.0f);
-        objs.back().mass = 1.0e16f;
-        objs.back().density = 1000.0f;
-        objs.back().radius =
-            pow(((3 * objs.back().mass / objs.back().density) / (4 * 3.14159265359)),
-                (1.0f / 3.0f)) /
-            100000.0f;
+        const size_t countBeforeAppend = objectCount;
+        objs.emplace_back(glm::vec3(0.0f, 0.25f, 0.0f), glm::vec3(12.0f, -3.0f, 1.0f), 1.0e18f,
+                          1000.0f);
         objs.back().color = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
         objs.back().initializing = true;
         SynchronizeObjectStateBuffers(objectCount, objs.size());
+        Require(objectStateCapacity == 256,
+                "Appending one object unexpectedly resized the minimum-capacity buffers");
         Require(objs.back().gpuStateIndex == objectCount - 1,
                 "Late-created object was not assigned a GPU state slot");
+        ValidateObjectBufferLayout(objectCount);
         referenceState.push_back({objs.back().id, objs.back().position, objs.back().velocity,
-                                  objs.back().mass, objs.back().radius, objs.back().initializing});
+                                  objs.back().mass, objs.back().radius, objs.back().initializing,
+                                  objs.back().launched});
+        std::vector<ReferenceObject> referenceWithoutInitializingObject(referenceState.begin(),
+                                                                        referenceState.end() - 1);
+        const std::vector<AccelerationSample> expectedWithoutInitializingObject =
+            AdvanceReference(referenceWithoutInitializingObject, epsilon, false);
         const std::vector<AccelerationSample> expectedAccelerations =
-            AdvanceReference(referenceState, epsilon);
-        const GLuint currentHandleBefore = gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
-        const GLuint nextHandleBefore = gpuMemoryManager.Get(BufferRole::NextState).Handle();
-        RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false);
+            AdvanceReference(referenceState, epsilon, false);
+        for (size_t index = 0; index < countBeforeAppend; ++index)
+        {
+            Require(glm::length(expectedAccelerations[index].acceleration -
+                                expectedWithoutInitializingObject[index].acceleration) < 1.0e-7f,
+                    "Initializing object affected the reference physics of an existing body");
+        }
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                             transitionCount);
         gpuMemoryManager.FenceGpuCompletion();
-        Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == nextHandleBefore &&
-                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == currentHandleBefore,
-                "CurrentState/NextState did not exchange after adding an object");
         positionChecksum +=
             MeasureFenceAndMappedPositionRead(objectCount, totalFenceWait, totalMappedRead);
         ++timingSamples;
-        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState,
-                                   objs.size(), renderMetrics);
-        ValidateGpuState(referenceState, expectedAccelerations, validationSteps + 1);
+        ValidateObjectBufferLayout(objectCount);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
+        ValidateGpuState(referenceState, expectedAccelerations, transitionCount, validationMetrics);
+        const auto *initializingAcceleration =
+            gpuMemoryManager.Get(BufferRole::ObjectAcceleration).MappedPtr<GpuObjectAcceleration>();
+        const auto *initializingCollision =
+            gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+        Require(glm::length(glm::vec3(
+                    initializingAcceleration[objs.back().gpuStateIndex].acceleration)) < 1.0e-7f,
+                "Initializing object received normal-physics acceleration");
+        Require(initializingCollision[objs.back().gpuStateIndex].overlapCount == 0u,
+                "Initializing object retained a stale collision count");
+        const auto *initializingState =
+            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+        Require(
+            glm::all(glm::equal(glm::vec3(initializingState[objs.back().gpuStateIndex].position),
+                                objs.back().position)) &&
+                glm::all(
+                    glm::equal(glm::vec3(initializingState[objs.back().gpuStateIndex].velocity),
+                               objs.back().velocity)),
+            "Initializing object did not preserve its exact state");
 
-        const std::vector<glm::vec3> pausedPositions = [&referenceState]
+        objs.back().initializing = false;
+        objs.back().launched = true;
+        SynchronizeObjectGpuProperties(objs.size() - 1);
+        referenceState.back().initializing = false;
+        referenceState.back().launched = true;
+        const float firstLaunchDistance =
+            glm::length(referenceState[0].position - referenceState.back().position);
+        const float secondLaunchDistance =
+            glm::length(referenceState[1].position - referenceState.back().position);
+        Require(firstLaunchDistance > 0.0f &&
+                    firstLaunchDistance < referenceState[0].radius + referenceState.back().radius &&
+                    secondLaunchDistance > 0.0f &&
+                    secondLaunchDistance < referenceState[1].radius + referenceState.back().radius,
+                "Launched collision geometry does not overlap using constructor-computed radii");
+        const glm::vec3 firstInitialVelocity = referenceState[0].velocity;
+        const glm::vec3 secondInitialVelocity = referenceState[1].velocity;
+        const glm::vec3 launchedInitialVelocity = referenceState.back().velocity;
+        const std::vector<AccelerationSample> launchedAccelerations =
+            AdvanceReference(referenceState, epsilon, false);
+        Require(glm::length(launchedAccelerations.back().acceleration) > 1.0e-6f,
+                "Launched object did not participate in the reference physics");
+        Require(launchedAccelerations[0].collisionCount == 1 &&
+                    launchedAccelerations[1].collisionCount == 1 &&
+                    launchedAccelerations.back().collisionCount == 2,
+                "Actual-radius geometry did not produce the expected one/two overlaps");
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                             transitionCount);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
+        ValidateGpuState(referenceState, launchedAccelerations, transitionCount, validationMetrics);
+        const auto *launchedState =
+            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+        const glm::vec3 expectedEvenOverlapVelocity =
+            (launchedInitialVelocity + launchedAccelerations.back().acceleration / 96.0f) *
+            (-0.2f * -0.2f);
+        Require(glm::length(glm::vec3(launchedState[objs.back().gpuStateIndex].velocity) -
+                            expectedEvenOverlapVelocity) <= 1.0e-6f,
+                "Two overlaps did not apply the positive even-parity collision scale");
+        const glm::vec3 expectedOddOverlapVelocity =
+            (firstInitialVelocity + launchedAccelerations[0].acceleration / 96.0f) * -0.2f;
+        Require(glm::length(glm::vec3(launchedState[objs[0].gpuStateIndex].velocity) -
+                            expectedOddOverlapVelocity) <= 1.0e-6f,
+                "One overlap did not apply the negative odd-parity collision scale");
+        (void)secondInitialVelocity;
+        const auto *controls =
+            gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+        Require(controls[objs.back().gpuStateIndex].initializing == 0u &&
+                    controls[objs.back().gpuStateIndex].launched == 1u,
+                "Initializing-to-launched control metadata was not synchronized");
+
+        std::vector<glm::vec3> pausedPositions;
+        std::vector<glm::vec3> pausedVelocities;
+        pausedPositions.reserve(referenceState.size());
+        pausedVelocities.reserve(referenceState.size());
+        gpuMemoryManager.WaitForGpuCompletion();
+        const auto *stateBeforePause =
+            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+        Require(stateBeforePause != nullptr, "CurrentState mapping unavailable before pause");
+        for (const Object &object : objs)
         {
-            std::vector<glm::vec3> positions;
-            positions.reserve(referenceState.size());
-            for (const ReferenceObject &object : referenceState)
-            {
-                positions.push_back(object.position);
-            }
-            return positions;
-        }();
-        RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, true);
-        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState,
-                                   objs.size(), renderMetrics);
+            pausedPositions.emplace_back(stateBeforePause[object.gpuStateIndex].position);
+            pausedVelocities.emplace_back(stateBeforePause[object.gpuStateIndex].velocity);
+        }
+        const std::vector<AccelerationSample> pausedAccelerations =
+            AdvanceReference(referenceState, epsilon, true);
+        Require(glm::length(pausedAccelerations.back().acceleration) > 1.0e-6f,
+                "Paused acceleration diagnostic was unexpectedly empty");
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, true,
+                             transitionCount);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
         gpuMemoryManager.WaitForGpuCompletion();
         const auto *pausedState =
             gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
         Require(pausedState != nullptr, "CurrentState mapping unavailable after paused step");
         for (size_t index = 0; index < pausedPositions.size(); ++index)
         {
-            Require(glm::length(glm::vec3(pausedState[index].position) - pausedPositions[index]) <=
-                        0.002f,
-                    "Paused simulation changed an object's rendered position");
+            const size_t slot = objs[index].gpuStateIndex;
+            Require(
+                glm::all(glm::equal(glm::vec3(pausedState[slot].position), pausedPositions[index])),
+                "Paused simulation changed an object's position");
+            Require(glm::all(
+                        glm::equal(glm::vec3(pausedState[slot].velocity), pausedVelocities[index])),
+                    "Paused simulation changed an object's velocity");
         }
+        ValidateGpuState(referenceState, pausedAccelerations, transitionCount, validationMetrics);
 
         const std::vector<AccelerationSample> resumedAccelerations =
-            AdvanceReference(referenceState, epsilon);
-        RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false);
-        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState,
-                                   objs.size(), renderMetrics);
-        ValidateGpuState(referenceState, resumedAccelerations, validationSteps + 2);
+            AdvanceReference(referenceState, epsilon, false);
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                             transitionCount);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
+        ValidateGpuState(referenceState, resumedAccelerations, transitionCount, validationMetrics);
+
+        const size_t countBeforeGrowth = objectCount;
+        const size_t capacityBeforeGrowth = objectStateCapacity;
+        const auto currentBeforeGrowth =
+            CopyMappedBuffer<GpuObjectState>(BufferRole::CurrentState, countBeforeGrowth);
+        const auto nextBeforeGrowth =
+            CopyMappedBuffer<GpuObjectState>(BufferRole::NextState, countBeforeGrowth);
+        const auto physicalBeforeGrowth =
+            CopyMappedBuffer<GpuObjectPhysical>(BufferRole::ObjectPhysical, countBeforeGrowth);
+        const auto derivedBeforeGrowth =
+            CopyMappedBuffer<GpuObjectDerived>(BufferRole::ObjectDerived, countBeforeGrowth);
+        const auto controlBeforeGrowth =
+            CopyMappedBuffer<GpuObjectControl>(BufferRole::ObjectControl, countBeforeGrowth);
+        const auto accelerationBeforeGrowth = CopyMappedBuffer<GpuObjectAcceleration>(
+            BufferRole::ObjectAcceleration, countBeforeGrowth);
+        const auto collisionBeforeGrowth =
+            CopyMappedBuffer<GpuObjectCollision>(BufferRole::ObjectCollision, countBeforeGrowth);
+        const auto renderBeforeGrowth =
+            CopyMappedBuffer<GpuObjectRender>(BufferRole::ObjectRender, countBeforeGrowth);
+
+        constexpr size_t growthObjectCount = 257;
+        while (objs.size() < growthObjectCount)
+        {
+            const float offset = static_cast<float>(objs.size());
+            objs.emplace_back(glm::vec3(20.0f + offset * 2.0f, 50.0f, 0.0f), glm::vec3(0.0f),
+                              1.0e16f, 1000.0f);
+            objs.back().initializing = true;
+        }
+        Require(objs.size() > capacityBeforeGrowth,
+                "Capacity-growth scenario did not exceed the old capacity");
+        SynchronizeObjectStateBuffers(objectCount, objs.size());
+        Require(capacityBeforeGrowth == 256 && objectStateCapacity == 512,
+                "Object state buffers did not grow from 256 to 512 slots");
+        ValidateObjectBufferLayout(objectCount);
+
+        const auto *currentAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+        const auto *nextAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::NextState).MappedPtr<GpuObjectState>();
+        const auto *physicalAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+        const auto *derivedAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+        const auto *controlAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+        const auto *accelerationAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectAcceleration).MappedPtr<GpuObjectAcceleration>();
+        const auto *collisionAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+        const auto *renderAfterGrowth =
+            gpuMemoryManager.Get(BufferRole::ObjectRender).MappedPtr<GpuObjectRender>();
+        for (size_t index = 0; index < countBeforeGrowth; ++index)
+        {
+            Require(glm::length(currentAfterGrowth[index].position -
+                                currentBeforeGrowth[index].position) <= 1.0e-6f &&
+                        glm::length(currentAfterGrowth[index].velocity -
+                                    currentBeforeGrowth[index].velocity) <= 1.0e-6f,
+                    "Capacity growth did not preserve CurrentState");
+            Require(glm::length(nextAfterGrowth[index].position -
+                                nextBeforeGrowth[index].position) <= 1.0e-6f &&
+                        glm::length(nextAfterGrowth[index].velocity -
+                                    nextBeforeGrowth[index].velocity) <= 1.0e-6f,
+                    "Capacity growth did not preserve NextState");
+            Require(glm::length(physicalAfterGrowth[index].massDensity -
+                                physicalBeforeGrowth[index].massDensity) <= 1.0e-6f,
+                    "Capacity growth did not preserve ObjectPhysical");
+            Require(glm::length(derivedAfterGrowth[index].radiusRs -
+                                derivedBeforeGrowth[index].radiusRs) <= 1.0e-6f,
+                    "Capacity growth did not preserve ObjectDerived");
+            Require(controlAfterGrowth[index].initializing ==
+                            controlBeforeGrowth[index].initializing &&
+                        controlAfterGrowth[index].launched == controlBeforeGrowth[index].launched &&
+                        controlAfterGrowth[index].target == controlBeforeGrowth[index].target &&
+                        controlAfterGrowth[index].id == controlBeforeGrowth[index].id,
+                    "Capacity growth did not preserve ObjectControl");
+            Require(glm::length(accelerationAfterGrowth[index].acceleration -
+                                accelerationBeforeGrowth[index].acceleration) <= 1.0e-6f,
+                    "Capacity growth did not preserve ObjectAcceleration");
+            Require(collisionAfterGrowth[index].overlapCount ==
+                        collisionBeforeGrowth[index].overlapCount,
+                    "Capacity growth did not preserve ObjectCollision");
+            Require(glm::length(renderAfterGrowth[index].color - renderBeforeGrowth[index].color) <=
+                        1.0e-6f,
+                    "Capacity growth did not preserve ObjectRender");
+        }
+        for (size_t index = referenceState.size(); index < objs.size(); ++index)
+        {
+            const Object &object = objs[index];
+            referenceState.push_back({object.id, object.position, object.velocity, object.mass,
+                                      object.radius, object.initializing, object.launched});
+        }
+
+        const std::vector<AccelerationSample> growthAccelerations =
+            AdvanceReference(referenceState, epsilon, false);
+        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
+                             transitionCount);
+        gpuMemoryManager.FenceGpuCompletion();
+        ValidateObjectBufferLayout(objectCount);
+        ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
+                                   renderMetrics);
+        ValidateGpuState(referenceState, growthAccelerations, transitionCount, validationMetrics);
 
         const double averageWaitMicroseconds =
             std::chrono::duration<double, std::micro>(totalFenceWait).count() / timingSamples;
@@ -522,9 +892,22 @@ int main()
         Require(glError == GL_NO_ERROR, "OpenGL reported an error during GPU validation");
         ShutdownValidation(window, renderingProgram, nbodyProgram, integrateProgram,
                            validationFramebuffer, validationColorTexture);
-        std::cout << "GPU validation passed for rendering positions, lifecycle, pause/resume, and "
-                     "11 state transitions."
-                  << std::endl;
+        std::cout << "Validation scenarios: two-body acceleration, zero interaction, "
+                  << "single and multiple overlap parity, zero-object dispatch, 8-step ping-pong, "
+                  << "pause/resume, initializing exclusion and launch, "
+                  << "append without resize, 256-to-512 capacity growth, FBO position/scale/color, "
+                  << "invalid slot, and 0/1/2 instances." << std::endl;
+        std::cout << "Validation summary: state transitions=" << transitionCount
+                  << ", oracle checkpoints=" << validationMetrics.checkpoints
+                  << ", max acceleration error=" << validationMetrics.maxAccelerationError
+                  << " m/s^2, max relative acceleration error="
+                  << validationMetrics.maxRelativeAccelerationError
+                  << ", max collision-count error=" << validationMetrics.maxCollisionCountError
+                  << ", max position error=" << validationMetrics.maxPositionError
+                  << " units, max velocity error=" << validationMetrics.maxVelocityError
+                  << " units, final logical count=" << objectCount
+                  << ", final capacity=" << objectStateCapacity << std::endl;
+        std::cout << "GPU/snapshot-oracle validation passed." << std::endl;
         return 0;
     }
     catch (const std::exception &error)

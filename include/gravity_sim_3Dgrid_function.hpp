@@ -33,7 +33,9 @@ std::uint32_t AllocateObjectId();
 
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
-void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram);
+void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram,
+                         GLuint &objectRenderingShaderProgram, GLuint &nbodyShaderProgram,
+                         GLuint &integrateShaderProgram);
 void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
                               GLint &objectColorLocation, GLint &viewLocation,
                               glm::vec3 &cameraPosition);
@@ -49,14 +51,15 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
-void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon, bool paused);
+void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon);
 void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused);
 void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
 void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram,
-             GLuint objectRenderingShaderProgram);
+             GLuint objectRenderingShaderProgram, GLuint nbodyShaderProgram,
+             GLuint integrateShaderProgram);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
 void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
@@ -176,7 +179,11 @@ struct GpuObjectControl
 struct GpuObjectAcceleration
 {
     glm::vec4 acceleration;
-    glm::vec4 velocityContribution;
+};
+
+struct GpuObjectCollision
+{
+    std::uint32_t overlapCount;
 };
 
 struct GpuObjectRender
@@ -189,7 +196,8 @@ static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectControl) == sizeof(glm::vec4));
 static_assert(offsetof(GpuObjectControl, id) == 3 * sizeof(std::uint32_t));
-static_assert(sizeof(GpuObjectAcceleration) == 2 * sizeof(glm::vec4));
+static_assert(sizeof(GpuObjectAcceleration) == 16);
+static_assert(sizeof(GpuObjectCollision) == 4);
 static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
