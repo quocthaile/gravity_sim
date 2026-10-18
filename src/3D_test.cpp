@@ -5,11 +5,13 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
 
-GLFWwindow* StartGLU();
-void CreateVBOVAO(GLuint& VAO, GLuint& VBO, const float* vertices, size_t vertexCount);
-GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource);
+GLFWwindow *StartGLU();
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
+                       size_t vertexCount);
+GLuint CreateShaderProgram(const char *vertexSource,
+                           const char *fragmentSource);
 
-const char* vertexShaderSource = R"glsl(
+const char *vertexShaderSource = R"glsl(
     #version 330 core
     layout (location = 0) in vec3 aPos;
     void main() {
@@ -17,7 +19,7 @@ const char* vertexShaderSource = R"glsl(
     }
 )glsl";
 
-const char* fragmentShaderSource = R"glsl(
+const char *fragmentShaderSource = R"glsl(
     #version 330 core
     out vec4 FragColor;
     void main() {
@@ -25,22 +27,25 @@ const char* fragmentShaderSource = R"glsl(
     }
 )glsl";
 
-int main() {
-    GLFWwindow* window = StartGLU();
-    GLuint shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
+int main()
+{
+    GLFWwindow *window = StartGLU();
+    GLuint shaderProgram =
+        CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
 
-    //vertex data
+    // vertex data
     float vertices[] = {
         -0.5f, -0.5f, 0.0f, // Bottom left
-         0.5f, -0.5f, 0.0f, // Bottom right
-         0.0f,  0.5f, 0.0f  // Top center
+        0.5f,  -0.5f, 0.0f, // Bottom right
+        0.0f,  0.5f,  0.0f  // Top center
     };
 
     // Create VAO and VBO
     GLuint VAO, VBO;
-    CreateVBOVAO(VAO, VBO, vertices, sizeof(vertices) / sizeof(float));
+    CreateMeshBuffers(VAO, VBO, vertices, sizeof(vertices) / sizeof(float));
 
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(window))
+    {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glUseProgram(shaderProgram);
@@ -61,13 +66,16 @@ int main() {
     return 0;
 }
 
-GLFWwindow* StartGLU() {
-    if (!glfwInit()) {
+GLFWwindow *StartGLU()
+{
+    if (!glfwInit())
+    {
         std::cout << "Failed to initialize GLFW, panic" << std::endl;
         return nullptr;
     }
-    GLFWwindow* window = glfwCreateWindow(800, 600, "3D_TEST", NULL, NULL);
-    if (!window) {
+    GLFWwindow *window = glfwCreateWindow(800, 600, "3D_TEST", NULL, NULL);
+    if (!window)
+    {
         std::cerr << "Failed to create GLFW window." << std::endl;
         glfwTerminate();
         return nullptr;
@@ -75,7 +83,8 @@ GLFWwindow* StartGLU() {
     glfwMakeContextCurrent(window);
 
     glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
+    if (glewInit() != GLEW_OK)
+    {
         std::cerr << "Failed to initialize GLEW." << std::endl;
         glfwTerminate();
         return nullptr;
@@ -86,7 +95,8 @@ GLFWwindow* StartGLU() {
     return window;
 }
 
-GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource) {
+GLuint CreateShaderProgram(const char *vertexSource, const char *fragmentSource)
+{
     // Vertex shader
     GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertexShader, 1, &vertexSource, nullptr);
@@ -94,10 +104,12 @@ GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource)
 
     GLint success;
     glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
-    if (!success) {
+    if (!success)
+    {
         char infoLog[512];
         glGetShaderInfoLog(vertexShader, 512, nullptr, infoLog);
-        std::cerr << "Vertex shader compilation failed: " << infoLog << std::endl;
+        std::cerr << "Vertex shader compilation failed: " << infoLog
+                  << std::endl;
     }
 
     // Fragment shader
@@ -106,10 +118,12 @@ GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource)
     glCompileShader(fragmentShader);
 
     glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
-    if (!success) {
+    if (!success)
+    {
         char infoLog[512];
         glGetShaderInfoLog(fragmentShader, 512, nullptr, infoLog);
-        std::cerr << "Fragment shader compilation failed: " << infoLog << std::endl;
+        std::cerr << "Fragment shader compilation failed: " << infoLog
+                  << std::endl;
     }
 
     // Shader program
@@ -119,7 +133,8 @@ GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource)
     glLinkProgram(shaderProgram);
 
     glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-    if (!success) {
+    if (!success)
+    {
         char infoLog[512];
         glGetProgramInfoLog(shaderProgram, 512, nullptr, infoLog);
         std::cerr << "Shader program linking failed: " << infoLog << std::endl;
@@ -131,18 +146,22 @@ GLuint CreateShaderProgram(const char* vertexSource, const char* fragmentSource)
     return shaderProgram;
 }
 
-void CreateVBOVAO(GLuint& VAO, GLuint& VBO, const float* vertices, size_t vertexCount) {
-    //VAO
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices,
+                       size_t vertexCount)
+{
+    // VAO
     glGenVertexArrays(1, &VAO);
     glBindVertexArray(VAO);
 
-    //VBO
+    // VBO
     glGenBuffers(1, &VBO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices,
+                 GL_STATIC_DRAW);
 
-    //vertex attribute pointers
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    // vertex attribute pointers
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
+                          (void *)0);
     glEnableVertexAttribArray(0);
 
     glBindVertexArray(0);

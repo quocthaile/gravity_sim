@@ -1,0 +1,1266 @@
+#include "gravity_sim_3Dgrid_function.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+
+void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
+                   double dt)
+{
+    std::ofstream file(filename);
+
+    if (!file.is_open())
+    {
+        std::cerr << "Cannot open file: " << filename << '\n';
+        return;
+    }
+
+    file << "time,step,object_id,x,y,z\n";
+    file << std::setprecision(10);
+
+    for (size_t step = 0; step < positions.size(); ++step)
+    {
+        double simulationTime = static_cast<double>(step) * dt;
+
+        for (size_t objectId = 0; objectId < positions[step].size(); ++objectId)
+        {
+            const auto &p = positions[step][objectId];
+
+            file << simulationTime << ',' << step << ',' << objectId << ',' << p.x << ',' << p.y
+                 << ',' << p.z << '\n';
+        }
+    }
+
+    if (!file.good())
+    {
+        std::cerr << "Error writing CSV: " << filename << '\n';
+    }
+    else
+    {
+        std::cout << "Saved positions to " << filename << '\n';
+    }
+}
+
+struct ObjectMesh
+{
+    GLuint objectVAO = 0;
+    GLuint objectVBO = 0;
+    GLsizei vertexCount = 0;
+};
+
+ObjectMesh objectMesh;
+
+// Tolerances for float comparison: absolute for values near zero, relative for large magnitudes
+// (e.g. mass ~1e22) where a fixed absolute epsilon would be meaningless.
+constexpr float kFloatAbsEpsilon = 1e-6f;
+constexpr float kFloatRelEpsilon = 1e-5f;
+
+bool IsNearlyEqual(float left, float right)
+{
+    if (left == right) // Fast path; also handles matching infinities.
+    {
+        return true;
+    }
+    const float diff = std::fabs(left - right);
+    const float scale = std::max(std::fabs(left), std::fabs(right));
+    return diff <= std::max(kFloatAbsEpsilon, kFloatRelEpsilon * scale);
+}
+
+bool IsSameVec4(const glm::vec4 &left, const glm::vec4 &right)
+{
+    return IsNearlyEqual(left.x, right.x) && IsNearlyEqual(left.y, right.y) &&
+           IsNearlyEqual(left.z, right.z) && IsNearlyEqual(left.w, right.w);
+}
+
+std::uint32_t AllocateObjectId()
+{
+    // Monotonic, deterministic within one run: IDs follow Object construction order and are never
+    // reused, so they stay unique among simultaneously existing objects.
+    static std::uint32_t nextObjectId = kInvalidObjectId + 1;
+    if (nextObjectId == std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::overflow_error("Object ID space exhausted");
+    }
+    return nextObjectId++;
+}
+
+std::string LoadShaderSource(const std::string &filePath)
+{
+    std::ifstream shaderFile(filePath);
+    if (!shaderFile)
+    {
+        throw std::runtime_error("Unable to open shader file: " + filePath);
+    }
+    return std::string(std::istreambuf_iterator<char>(shaderFile),
+                       std::istreambuf_iterator<char>());
+}
+
+void CreateShaderProgram(ShaderPrograms &shaderPrograms)
+{
+    shaderPrograms.gridRendering = CreateGraphicsProgram("shaders/grid.vert", "shaders/grid.frag");
+    shaderPrograms.objectRendering =
+        CreateGraphicsProgram("shaders/objects.vert", "shaders/objects.frag");
+    shaderPrograms.gridCompute = CreateComputeProgram("shaders/grid.comp");
+    shaderPrograms.nbodyCompute = CreateComputeProgram("shaders/nbody.comp");
+    shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
+}
+
+glm::mat4 CreateScenePerspectiveProjection()
+{
+    return glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
+}
+
+void InitializeGridRenderingUniforms(GLuint gridProgram, ShaderUniformLocations &uniformLocations)
+{
+    glUseProgram(gridProgram);
+    uniformLocations.gridModel = glGetUniformLocation(gridProgram, "model");
+    uniformLocations.gridObjectColor = glGetUniformLocation(gridProgram, "objectColor");
+    uniformLocations.gridView = glGetUniformLocation(gridProgram, "view");
+    uniformLocations.gridProjection = glGetUniformLocation(gridProgram, "projection");
+
+    const glm::mat4 projection = CreateScenePerspectiveProjection();
+    glUniformMatrix4fv(uniformLocations.gridProjection, 1, GL_FALSE, glm::value_ptr(projection));
+}
+
+void InitializeObjectRenderingUniforms(GLuint objectProgram,
+                                       ShaderUniformLocations &uniformLocations)
+{
+    glUseProgram(objectProgram);
+    uniformLocations.objectView = glGetUniformLocation(objectProgram, "view");
+    uniformLocations.objectProjection = glGetUniformLocation(objectProgram, "projection");
+
+    const glm::mat4 projection = CreateScenePerspectiveProjection();
+    glUniformMatrix4fv(uniformLocations.objectProjection, 1, GL_FALSE, glm::value_ptr(projection));
+}
+
+void InitializeGlfwCallbacks(GLFWwindow *window)
+{
+    // Mouse callbacks for camera rotation and zooming.
+    glfwSetCursorPosCallback(window, MouseCallback);
+    glfwSetScrollCallback(window, ScrollCallback);
+    glfwSetKeyCallback(window, KeyCallback);
+    // Mouse button callback for creating and launching objects.
+    glfwSetMouseButtonCallback(window, MouseButtonCallback);
+    // GLFW_CURSOR_NORMAL allows the mouse to move freely and be visible, enabling camera rotation
+    // with the right mouse button.
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+}
+
+void PrintComputeLimits()
+{
+    GLint maxSsboBindings = 0;
+    GLint64 maxSsboBlockSize = 0;
+    GLint maxComputeStorageBlocks = 0;
+    GLint maxWorkGroupInvocations = 0;
+    GLint maxSharedMemorySize = 0;
+    GLint maxWorkGroupSize[3] = {};
+    GLint maxWorkGroupCount[3] = {};
+
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxSsboBindings);
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &maxSsboBlockSize);
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &maxComputeStorageBlocks);
+    glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &maxWorkGroupInvocations);
+    glGetIntegerv(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE, &maxSharedMemorySize);
+
+    for (GLuint dimension = 0; dimension < 3; ++dimension)
+    {
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, dimension, &maxWorkGroupSize[dimension]);
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, dimension, &maxWorkGroupCount[dimension]);
+    }
+
+    std::cout << "OpenGL compute limits" << std::endl;
+    std::cout << "  SSBO binding points: " << maxSsboBindings << " (valid indices: 0 - "
+              << maxSsboBindings - 1 << ")" << std::endl;
+    std::cout << "  Max SSBO block size: " << maxSsboBlockSize << " bytes" << std::endl;
+    std::cout << "  Compute shader SSBO blocks: " << maxComputeStorageBlocks << std::endl;
+    std::cout << "  Max work-group size: " << maxWorkGroupSize[0] << " x " << maxWorkGroupSize[1]
+              << " x " << maxWorkGroupSize[2] << std::endl;
+    std::cout << "  Max invocations per work-group: " << maxWorkGroupInvocations << std::endl;
+    std::cout << "  Max work-group count: " << maxWorkGroupCount[0] << " x " << maxWorkGroupCount[1]
+              << " x " << maxWorkGroupCount[2] << std::endl;
+    std::cout << "  Max shared memory per work-group: " << maxSharedMemorySize << " bytes"
+              << std::endl;
+}
+
+GLFWwindow *StartGLU()
+{
+    // Initialize GLFW and create a window with an OpenGL context.
+    if (!glfwInit())
+    {
+        std::cout << "Failed to initialize GLFW." << std::endl;
+        return nullptr;
+    }
+    // Request OpenGL 4.4 core for immutable buffer storage and persistent mapping.
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    // Create a window with the specified dimensions and title.
+    GLFWwindow *window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
+    if (!window)
+    {
+        std::cerr << "Failed to create GLFW window." << std::endl;
+        glfwTerminate();
+        return nullptr;
+    }
+    glfwMakeContextCurrent(window);
+    // Initialize GLEW to load OpenGL function pointers.
+    glewExperimental = GL_TRUE;
+    if (glewInit() != GLEW_OK)
+    {
+        std::cerr << "Failed to initialize GLEW." << std::endl;
+        glfwTerminate();
+        return nullptr;
+    }
+    if (!GLEW_VERSION_4_4)
+    {
+        std::cerr << "OpenGL 4.4 is required for persistent mapped buffer storage." << std::endl;
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return nullptr;
+    }
+    std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
+    // Print compute limits for debugging purposes.
+    PrintComputeLimits();
+    // Enable depth testing and set the viewport dimensions.
+    glEnable(GL_DEPTH_TEST);
+    glViewport(0, 0, 1920, 1080);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    return window;
+}
+
+GLuint CreateGraphicsProgram(const std::string &vertexFilePath, const std::string &fragmentFilePath)
+{
+    const std::string vertexSource = LoadShaderSource(vertexFilePath);
+    const std::string fragmentSource = LoadShaderSource(fragmentFilePath);
+    const char *vertexSourceData = vertexSource.c_str();
+    const char *fragmentSourceData = fragmentSource.c_str();
+    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &vertexSourceData, nullptr);
+    glCompileShader(vertexShader);
+
+    GLint success;
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        char infoLog[512];
+        glGetShaderInfoLog(vertexShader, 512, nullptr, infoLog);
+        std::cerr << "Vertex shader compilation failed: " << infoLog << std::endl;
+    }
+
+    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &fragmentSourceData, nullptr);
+    glCompileShader(fragmentShader);
+
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        char infoLog[512];
+        glGetShaderInfoLog(fragmentShader, 512, nullptr, infoLog);
+        std::cerr << "Fragment shader compilation failed: " << infoLog << std::endl;
+    }
+
+    GLuint renderingShaderProgram = glCreateProgram();
+    glAttachShader(renderingShaderProgram, vertexShader);
+    glAttachShader(renderingShaderProgram, fragmentShader);
+    glLinkProgram(renderingShaderProgram);
+
+    glGetProgramiv(renderingShaderProgram, GL_LINK_STATUS, &success);
+    if (!success)
+    {
+        char infoLog[512];
+        glGetProgramInfoLog(renderingShaderProgram, 512, nullptr, infoLog);
+        std::cerr << "Shader program linking failed: " << infoLog << std::endl;
+    }
+
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return renderingShaderProgram;
+}
+
+GLuint CreateComputeProgram(const std::string &filePath)
+{
+    const std::string computeSource = LoadShaderSource(filePath);
+    GLuint computeShader = glCreateShader(GL_COMPUTE_SHADER);
+    const char *source = computeSource.c_str();
+    glShaderSource(computeShader, 1, &source, nullptr);
+    glCompileShader(computeShader);
+
+    GLint success = GL_FALSE;
+    glGetShaderiv(computeShader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        GLint infoLogLength = 0;
+        glGetShaderiv(computeShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+        std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
+        glGetShaderInfoLog(computeShader, infoLogLength, nullptr, infoLog.data());
+        glDeleteShader(computeShader);
+        throw std::runtime_error("Compute shader compilation failed: " + infoLog);
+    }
+
+    GLuint computeShaderProgram = glCreateProgram();
+    glAttachShader(computeShaderProgram, computeShader);
+    glLinkProgram(computeShaderProgram);
+
+    glGetProgramiv(computeShaderProgram, GL_LINK_STATUS, &success);
+    if (!success)
+    {
+        GLint infoLogLength = 0;
+        glGetProgramiv(computeShaderProgram, GL_INFO_LOG_LENGTH, &infoLogLength);
+        std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
+        glGetProgramInfoLog(computeShaderProgram, infoLogLength, nullptr, infoLog.data());
+        glDeleteShader(computeShader);
+        glDeleteProgram(computeShaderProgram);
+        throw std::runtime_error("Compute program linking failed: " + infoLog);
+    }
+
+    glDeleteShader(computeShader);
+    return computeShaderProgram;
+}
+
+void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t vertexCount,
+                       GLuint *EBO, const unsigned int *indices, size_t indexCount)
+{
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+
+    if (EBO != nullptr)
+    {
+        glGenBuffers(1, EBO);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices,
+                     GL_STATIC_DRAW);
+    }
+
+    glBindVertexArray(0);
+}
+
+void CreateUnitSphere()
+{
+    if (objectMesh.objectVAO != 0)
+    {
+        return;
+    }
+
+    std::vector<float> meshVertices;
+    constexpr int stacks = 10;
+    constexpr int sectors = 10;
+    for (int stack = 0; stack < stacks; ++stack)
+    {
+        const float theta1 = (static_cast<float>(stack) / stacks) * glm::pi<float>();
+        const float theta2 = (static_cast<float>(stack + 1) / stacks) * glm::pi<float>();
+        for (int sector = 0; sector < sectors; ++sector)
+        {
+            const float phi1 = (static_cast<float>(sector) / sectors) * 2.0f * glm::pi<float>();
+            const float phi2 = (static_cast<float>(sector + 1) / sectors) * 2.0f * glm::pi<float>();
+            const glm::vec3 v1 = SphericalToCartesian(1.0f, theta1, phi1);
+            const glm::vec3 v2 = SphericalToCartesian(1.0f, theta1, phi2);
+            const glm::vec3 v3 = SphericalToCartesian(1.0f, theta2, phi1);
+            const glm::vec3 v4 = SphericalToCartesian(1.0f, theta2, phi2);
+            meshVertices.insert(meshVertices.end(),
+                                {v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z, v2.x, v2.y,
+                                 v2.z, v4.x, v4.y, v4.z, v3.x, v3.y, v3.z});
+        }
+    }
+
+    objectMesh.vertexCount = static_cast<GLsizei>(meshVertices.size() / 3);
+    CreateMeshBuffers(objectMesh.objectVAO, objectMesh.objectVBO, meshVertices.data(),
+                      meshVertices.size());
+}
+
+void DestroyObjectRenderingResources()
+{
+    if (objectMesh.objectVAO != 0)
+    {
+        glDeleteVertexArrays(1, &objectMesh.objectVAO);
+        objectMesh.objectVAO = 0;
+    }
+    if (objectMesh.objectVBO != 0)
+    {
+        glDeleteBuffers(1, &objectMesh.objectVBO);
+        objectMesh.objectVBO = 0;
+    }
+    objectMesh.vertexCount = 0;
+}
+
+std::vector<glm::vec4> CreateBaseGridGPU()
+{
+    std::vector<float> gridVertices = CreateGridVertices(gridSize, gridDivisions);
+    const size_t nodeCount = gridVertices.size() / 3;
+    std::vector<glm::vec4> gpuGridVertices;
+    gpuGridVertices.reserve(nodeCount);
+    for (size_t i = 0; i < nodeCount; ++i)
+    {
+        gpuGridVertices.emplace_back(gridVertices[i * 3], gridVertices[i * 3 + 1],
+                                     gridVertices[i * 3 + 2], 1.0f);
+    }
+    return gpuGridVertices;
+}
+
+size_t CalculateObjectStateBufferCapacity(size_t requiredCount)
+{
+    if (requiredCount == 0)
+    {
+        return 0;
+    }
+    // Start with a minimum capacity of 256 and double it until it meets or exceeds the required
+    // count.
+    size_t capacity = (objectStateCapacity == 0) ? 256 : objectStateCapacity;
+    // Ensure the capacity is at least as large as the required count.
+    while (capacity < requiredCount)
+    {
+        if (capacity > std::numeric_limits<size_t>::max() / 2)
+        {
+            throw std::length_error("Object state capacity exceeds addressable memory");
+        }
+        capacity *= 2;
+    }
+    return capacity;
+}
+
+void ManageObjectStateBufferCapacity(size_t objectCount)
+{
+    constexpr size_t kMinimumObjectStateCapacity = 256;
+    size_t newCapacity = objectStateCapacity;
+
+    if (objectCount > objectStateCapacity)
+    {
+        newCapacity = CalculateObjectStateBufferCapacity(objectCount);
+    }
+    else if (objectStateCapacity > kMinimumObjectStateCapacity &&
+             objectCount <= objectStateCapacity / 4)
+    {
+        newCapacity = objectStateCapacity / 2;
+        if (newCapacity < kMinimumObjectStateCapacity)
+        {
+            newCapacity = kMinimumObjectStateCapacity;
+        }
+    }
+
+    if (newCapacity == objectStateCapacity)
+    {
+        return;
+    }
+
+    gpuMemoryManager.WaitForGpuCompletion();
+    gpuMemoryManager.Resize(BufferRole::CurrentState, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectPhysical, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectDerived, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectControl, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectAcceleration, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectRender, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectCollision, newCapacity);
+
+    objectStateCapacity = newCapacity;
+}
+
+void objectGpuState(size_t firstObject, size_t objectCount)
+{
+    if (firstObject > objectCount || objectCount > objs.size() || objectCount > objectStateCapacity)
+    {
+        throw std::out_of_range("Object materialization range exceeds available objects/capacity");
+    }
+
+    gpuMemoryManager.WaitForGpuCompletion();
+    auto *state = gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    auto *physical =
+        gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+    auto *derived = gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+    auto *control = gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    auto *render = gpuMemoryManager.Get(BufferRole::ObjectRender).MappedPtr<GpuObjectRender>();
+    auto *collisions =
+        gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+    if (state == nullptr || physical == nullptr || derived == nullptr || control == nullptr ||
+        render == nullptr || collisions == nullptr)
+    {
+        throw std::runtime_error("CPU-facing object buffers must be persistently mapped");
+    }
+
+    std::vector<GpuObjectState> nextStates;
+    std::vector<GpuObjectAcceleration> zeroAccelerations;
+    std::vector<GpuObjectCollision> zeroCollisions;
+    nextStates.reserve(objectCount - firstObject);
+    zeroAccelerations.assign(objectCount - firstObject, GpuObjectAcceleration{glm::vec4(0.0f)});
+    zeroCollisions.assign(objectCount - firstObject, GpuObjectCollision{0});
+    for (size_t i = firstObject; i < objectCount; ++i)
+    {
+        Object &object = objs[i];
+        object.gpuStateIndex = i;
+        const GpuObjectState initialState = {glm::vec4(object.GetPosition(), 0.0f),
+                                             glm::vec4(object.velocity, 0.0f)};
+        state[i] = initialState;
+        physical[i] = {glm::vec4(object.mass, object.density, 0.0f, 0.0f)};
+        derived[i] = {glm::vec4(object.radius, object.rs, 0.0f, 0.0f)};
+        control[i] = {static_cast<std::uint32_t>(object.initializing),
+                      static_cast<std::uint32_t>(object.launched),
+                      static_cast<std::uint32_t>(object.target), object.id};
+        render[i] = {object.color};
+        nextStates.push_back(initialState);
+    }
+
+    if (!nextStates.empty())
+    {
+        const std::size_t byteOffset = firstObject * sizeof(GpuObjectState);
+        gpuMemoryManager.Upload(BufferRole::NextState, nextStates.data(),
+                                nextStates.size() * sizeof(GpuObjectState), objectCount,
+                                byteOffset);
+        gpuMemoryManager.Upload(BufferRole::ObjectAcceleration, zeroAccelerations.data(),
+                                zeroAccelerations.size() * sizeof(GpuObjectAcceleration),
+                                objectCount, firstObject * sizeof(GpuObjectAcceleration));
+        gpuMemoryManager.Upload(BufferRole::ObjectCollision, zeroCollisions.data(),
+                                zeroCollisions.size() * sizeof(GpuObjectCollision), objectCount,
+                                firstObject * sizeof(GpuObjectCollision));
+    }
+
+    for (BufferRole role :
+         {BufferRole::CurrentState, BufferRole::ObjectPhysical, BufferRole::ObjectDerived,
+          BufferRole::ObjectControl, BufferRole::ObjectAcceleration, BufferRole::ObjectRender})
+    {
+        gpuMemoryManager.Get(role).SetLogicalCount(objectCount);
+    }
+    gpuMemoryManager.Get(BufferRole::ObjectCollision).SetLogicalCount(objectCount);
+    gpuMemoryManager.Get(BufferRole::NextState).SetLogicalCount(objectCount);
+}
+
+void SynchronizeObjectStateBuffers(size_t &objectCount, size_t newObjectCount)
+{
+    const size_t firstChangedObject = newObjectCount > objectCount ? objectCount : newObjectCount;
+    objectCount = newObjectCount;
+    ManageObjectStateBufferCapacity(objectCount);
+    objectGpuState(firstChangedObject, objectCount);
+}
+
+void SynchronizeObjectGpuProperties(size_t objectIndex)
+{
+    if (objectIndex >= objs.size() || !gpuMemoryManager.Contains(BufferRole::ObjectControl) ||
+        objectIndex >= gpuMemoryManager.Get(BufferRole::ObjectControl).LogicalCount())
+    {
+        return;
+    }
+
+    auto *physical =
+        gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+    auto *derived = gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+    auto *control = gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    auto *render = gpuMemoryManager.Get(BufferRole::ObjectRender).MappedPtr<GpuObjectRender>();
+    if (physical == nullptr || derived == nullptr || control == nullptr || render == nullptr)
+    {
+        throw std::runtime_error("CPU-facing object buffers must be persistently mapped");
+    }
+
+    const Object &object = objs[objectIndex];
+    const glm::vec4 massDensity(object.mass, object.density, 0.0f, 0.0f);
+    const glm::vec4 radiusRs(object.radius, object.rs, 0.0f, 0.0f);
+    const GpuObjectControl objectControl = {static_cast<std::uint32_t>(object.initializing),
+                                            static_cast<std::uint32_t>(object.launched),
+                                            static_cast<std::uint32_t>(object.target), object.id};
+    const bool physicalChanged = !IsSameVec4(physical[objectIndex].massDensity, massDensity);
+    const bool derivedChanged = !IsSameVec4(derived[objectIndex].radiusRs, radiusRs);
+    const bool controlChanged = control[objectIndex].initializing != objectControl.initializing ||
+                                control[objectIndex].launched != objectControl.launched ||
+                                control[objectIndex].target != objectControl.target ||
+                                control[objectIndex].id != objectControl.id;
+    const bool renderChanged = !IsSameVec4(render[objectIndex].color, object.color);
+    if (!physicalChanged && !derivedChanged && !controlChanged && !renderChanged)
+    {
+        return;
+    }
+
+    gpuMemoryManager.WaitForGpuCompletion();
+    if (physicalChanged)
+    {
+        physical[objectIndex].massDensity = massDensity;
+    }
+    if (derivedChanged)
+    {
+        derived[objectIndex].radiusRs = radiusRs;
+    }
+    if (controlChanged)
+    {
+        control[objectIndex] = objectControl;
+    }
+    if (renderChanged)
+    {
+        render[objectIndex].color = object.color;
+    }
+}
+
+void UploadInitializingObjectState(size_t objectIndex)
+{
+    if (objectIndex >= objs.size() || !objs[objectIndex].initializing ||
+        !gpuMemoryManager.Contains(BufferRole::CurrentState) ||
+        objectIndex >= gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount())
+    {
+        return;
+    }
+
+    gpuMemoryManager.WaitForGpuCompletion();
+    const Object &object = objs[objectIndex];
+    const GpuObjectState state = {glm::vec4(object.GetPosition(), 0.0f),
+                                  glm::vec4(object.velocity, 0.0f)};
+    const size_t logicalCount = objs.size();
+    const size_t byteOffset = objectIndex * sizeof(GpuObjectState);
+    gpuMemoryManager.Upload(BufferRole::CurrentState, &state, sizeof(state), logicalCount,
+                            byteOffset);
+    gpuMemoryManager.Upload(BufferRole::NextState, &state, sizeof(state), logicalCount, byteOffset);
+}
+
+void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
+                                      const std::vector<unsigned int> &gridIndices)
+{
+    // The grid VAO sources its vertices directly from the DeformedGrid buffer written by
+    // grid.comp, so ComputePipeline() must have created DeformedGrid before this is called.
+    const GpuBuffer &deformedGrid = gpuMemoryManager.Get(BufferRole::DeformedGrid);
+    if (deformedGrid.Capacity() < gridVertices.size())
+    {
+        throw std::length_error("DeformedGrid capacity is smaller than the grid node count");
+    }
+
+    gridNodeCount = gridVertices.size();
+    gridIndexCount = gridIndices.size();
+
+    glGenVertexArrays(1, &gridVAO);
+    glGenBuffers(1, &gridEBO);
+    glBindVertexArray(gridVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, deformedGrid.Handle());
+    // location 0, 3 positions, type float, not normalized, stride is size of glm::vec4, offset is 0
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
+    glEnableVertexAttribArray(0);
+    // Bind the EBO and upload the index data
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int),
+                 gridIndices.data(), GL_STATIC_DRAW);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
+{
+    GLint maxStorageBufferBindings = 0;
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxStorageBufferBindings);
+    if (maxStorageBufferBindings <= static_cast<GLint>(BindingFor(BufferRole::ObjectCollision)))
+    {
+        throw std::runtime_error("OpenGL does not provide SSBO binding 15 for ObjectCollision");
+    }
+
+    objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
+    if (objectStateCapacity == 0)
+    {
+        objectStateCapacity = 256;
+    }
+
+    gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectState),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::NextState, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectState),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectPhysical, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectPhysical),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectDerived, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectDerived),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectControl, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectControl),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectAcceleration, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Read,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectAcceleration),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectRender, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectRender),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectCollision, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
+                             MappingMode::PersistentCoherent, sizeof(GpuObjectCollision),
+                             objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(glm::vec4), gridVertices.size()});
+    gpuMemoryManager.Upload(BufferRole::BaseGrid, gridVertices.data(),
+                            gridVertices.size() * sizeof(glm::vec4), gridVertices.size());
+    gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(glm::vec4), gridVertices.size()});
+}
+
+void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    constexpr GLuint localSizeX = 64;
+    const GLuint groupCountX = static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
+                 static_cast<GLuint>(objectCount));
+    glUniform1d(glGetUniformLocation(computeShaderProgram, "u_gravitationalConstant"),
+                kGravitationalConstant);
+    glUniform1f(glGetUniformLocation(computeShaderProgram, "u_epsilon"), epsilon);
+    glDispatchCompute(groupCountX, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    static size_t lastReportedObjectCount = std::numeric_limits<size_t>::max();
+    if (objectCount != lastReportedObjectCount)
+    {
+        std::cout << "GPU N-body dispatch: objects=" << objectCount
+                  << ", work groups=" << groupCountX << " x 1 x 1" << std::endl;
+        lastReportedObjectCount = objectCount;
+    }
+}
+
+void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    constexpr GLuint localSizeX = 64;
+    const GLuint groupCountX = static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
+                 static_cast<GLuint>(objectCount));
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_paused"),
+                 static_cast<GLuint>(paused));
+    glDispatchCompute(groupCountX, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void RunObjectStateSync(GLFWwindow *window, size_t &objectCount)
+{
+    // 1. Update CPU-side properties of the object being created (mass/rs/radius).
+    UpdateInitializingObject(window);
+
+    // 2. Resize/materialize GPU object buffers when the object count changes.
+    const size_t currentObjectCount = objs.size();
+    if (currentObjectCount != objectCount)
+    {
+        SynchronizeObjectStateBuffers(objectCount, currentObjectCount);
+    }
+
+    // 3. Push the initializing object's properties to the GPU. Must run after step 2 because
+    //    SynchronizeObjectGpuProperties skips indices beyond the buffers' LogicalCount.
+    if (!objs.empty() && objs.back().initializing)
+    {
+        SynchronizeObjectGpuProperties(objs.size() - 1);
+    }
+}
+
+void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
+                           size_t objectCount, float epsilon, bool paused)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+    RunNBodyCompute(nbodyShaderProgram, objectCount, epsilon);
+    RunIntegration(integrateShaderProgram, objectCount, paused);
+    gpuMemoryManager.SwapCurrentNext();
+
+    static bool reportedRoles = false;
+    if (!reportedRoles)
+    {
+        std::cout << "GPU state roles after first transition: CurrentState buffer="
+                  << gpuMemoryManager.Get(BufferRole::CurrentState).Handle()
+                  << ", NextState buffer=" << gpuMemoryManager.Get(BufferRole::NextState).Handle()
+                  << std::endl;
+        reportedRoles = true;
+    }
+}
+
+void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
+{
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
+                 static_cast<GLuint>(objectCount));
+    const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
+    const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridWidth"), gridWidth);
+    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridHeight"), gridHeight);
+    // Round up work group counts
+    const GLuint groupCountX = (gridWidth + kGridLocalSizeX - 1) / kGridLocalSizeX;
+    const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;
+    // Dispatch the compute shader with the calculated number of work groups.
+    glDispatchCompute(groupCountX, groupCountY, 1);
+
+    // grid.comp writes DeformedGrid as an SSBO; the grid VAO fetches the same buffer as vertex
+    // attributes. This barrier orders that compute write -> vertex fetch dependency on the GPU.
+    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+}
+
+void Cleanup(const ShaderPrograms &shaderPrograms)
+{
+    DestroyObjectRenderingResources();
+    glDeleteVertexArrays(1, &gridVAO);
+    glDeleteBuffers(1, &gridEBO);
+    gpuMemoryManager.Shutdown();
+    glDeleteProgram(shaderPrograms.gridRendering);
+    glDeleteProgram(shaderPrograms.gridCompute);
+    glDeleteProgram(shaderPrograms.objectRendering);
+    glDeleteProgram(shaderPrograms.nbodyCompute);
+    glDeleteProgram(shaderPrograms.integrateCompute);
+
+    objs.clear();
+    gridVAO = 0;
+    gridEBO = 0;
+    objectStateCapacity = 0;
+    gridNodeCount = 0;
+    gridIndexCount = 0;
+
+    glfwTerminate();
+}
+
+void BeginFrame() { glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
+
+void UpdateInitializingObject(GLFWwindow *window)
+{
+    if (objs.empty() || !objs.back().initializing)
+        return;
+
+    Object &initializingObject = objs.back();
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+    {
+        initializingObject.mass *= 1.0 + 1.0 * deltaTime;
+        initializingObject.rs = (2 * kGravitationalConstant * initializingObject.mass) /
+                                (kSpeedOfLight * kSpeedOfLight);
+    }
+
+    initializingObject.radius =
+        pow((3 * initializingObject.mass / initializingObject.density) / (4 * 3.14159265359f),
+            1.0f / 3.0f) /
+        100000.0f;
+}
+
+void UpdateCamera(const ShaderPrograms &shaderPrograms,
+                  const ShaderUniformLocations &uniformLocations, glm::vec3 cameraPosition)
+{
+    const glm::mat4 view = glm::lookAt(cameraPosition, cameraPosition + cameraFront, cameraUp);
+
+    glUseProgram(shaderPrograms.gridRendering);
+    glUniformMatrix4fv(uniformLocations.gridView, 1, GL_FALSE, glm::value_ptr(view));
+
+    glUseProgram(shaderPrograms.objectRendering);
+    glUniformMatrix4fv(uniformLocations.objectView, 1, GL_FALSE, glm::value_ptr(view));
+}
+
+void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods)
+{
+    (void)scanCode;
+    float cameraSpeed = 1000.0f * deltaTime;
+    bool shiftPressed = (mods & GLFW_MOD_SHIFT) != 0;
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        cameraPos += cameraSpeed * cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        cameraPos -= cameraSpeed * cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        cameraPos -= cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos += cameraSpeed * glm::normalize(glm::cross(cameraFront, cameraUp));
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
+        cameraPos += cameraSpeed * cameraUp;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        cameraPos -= cameraSpeed * cameraUp;
+
+    if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS)
+        pause = true;
+    if (glfwGetKey(window, GLFW_KEY_K) == GLFW_RELEASE)
+        pause = false;
+
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+    {
+        glfwTerminate();
+        glfwWindowShouldClose(window);
+        running = false;
+    }
+
+    if (!objs.empty() && objs.back().initializing)
+    {
+        Object &lastObj = objs.back();
+        bool positionChanged = false;
+        if (key == GLFW_KEY_UP && (action == GLFW_PRESS || action == GLFW_REPEAT))
+        {
+            if (!shiftPressed)
+            {
+                lastObj.position[1] += 0.5;
+            }
+            else
+            {
+                lastObj.position[2] += 0.5;
+            }
+            positionChanged = true;
+        }
+        if (key == GLFW_KEY_DOWN && (action == GLFW_PRESS || action == GLFW_REPEAT))
+        {
+            if (!shiftPressed)
+            {
+                lastObj.position[1] -= 0.5;
+            }
+            else
+            {
+                lastObj.position[2] -= 0.5;
+            }
+            positionChanged = true;
+        }
+        if (key == GLFW_KEY_RIGHT && (action == GLFW_PRESS || action == GLFW_REPEAT))
+        {
+            lastObj.position[0] += 0.5;
+            positionChanged = true;
+        }
+        if (key == GLFW_KEY_LEFT && (action == GLFW_PRESS || action == GLFW_REPEAT))
+        {
+            lastObj.position[0] -= 0.5;
+            positionChanged = true;
+        }
+        if (positionChanged)
+        {
+            UploadInitializingObjectState(objs.size() - 1);
+        }
+    }
+}
+
+void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
+{
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) != GLFW_PRESS)
+    {
+        lastX = static_cast<float>(xPosition);
+        lastY = static_cast<float>(yPosition);
+        return;
+    }
+    // 0----> +x
+    // |
+    // |
+    // +y
+    float xOffset = xPosition - lastX;
+    float yOffset = lastY - yPosition;
+    lastX = xPosition;
+    lastY = yPosition;
+    // Adjust the sensitivity of the mouse movement for smoother camera rotation.
+    float sensitivity = 0.1f;
+    xOffset *= sensitivity;
+    yOffset *= sensitivity;
+    // Update the yaw and pitch angles based on mouse movement.
+    yaw += xOffset;
+    pitch += yOffset;
+    // Constrain the pitch angle to prevent the camera from flipping upside down.
+    if (pitch > 89.0f)
+        pitch = 89.0f;
+    if (pitch < -89.0f)
+        pitch = -89.0f;
+
+    glm::vec3 front;
+    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+    front.y = sin(glm::radians(pitch));
+    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+    cameraFront = glm::normalize(front);
+}
+
+void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
+{
+    (void)mods;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS)
+    {
+        double xPosition = 0.0;
+        double yPosition = 0.0;
+        glfwGetCursorPos(window, &xPosition, &yPosition);
+        lastX = static_cast<float>(xPosition);
+        lastY = static_cast<float>(yPosition);
+        return;
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+        if (action == GLFW_PRESS)
+        {
+            objs.emplace_back(glm::vec3(0.0, 0.0, 0.0), glm::vec3(0.0f, 0.0f, 0.0f), initMass);
+            objs.back().initializing = true;
+        }
+        if (action == GLFW_RELEASE && !objs.empty())
+        {
+            objs.back().initializing = false;
+            objs.back().launched = true;
+            SynchronizeObjectGpuProperties(objs.size() - 1);
+        }
+    }
+}
+
+void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset)
+{
+    (void)window;
+    (void)xOffset;
+    float cameraSpeed = 50000.0f * deltaTime;
+    if (yOffset > 0)
+        cameraPos += cameraSpeed * cameraFront;
+    else if (yOffset < 0)
+        cameraPos -= cameraSpeed * cameraFront;
+}
+
+glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
+{
+    float x = radius * sin(theta) * cos(phi);
+    float y = radius * cos(theta);
+    float z = radius * sin(theta) * sin(phi);
+    return glm::vec3(x, y, z);
+}
+
+void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
+              const ShaderUniformLocations &uniformLocations)
+{
+    glUseProgram(renderingShaderProgram);
+    glUniform4f(uniformLocations.gridObjectColor, 1.0f, 1.0f, 1.0f, 0.25f);
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(uniformLocations.gridModel, 1, GL_FALSE, glm::value_ptr(model));
+    glBindVertexArray(gridVAO);
+    // glPointSize(5.0f);
+    glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+}
+
+void DrawObjects(GLuint objectRenderingShaderProgram, const std::vector<Object> &objects)
+{
+    // Check conditions before rendering to avoid OpenGL errors and ensure valid state.
+    if (objects.empty())
+    {
+        return;
+    }
+
+    if (objectMesh.objectVAO == 0 || objectMesh.vertexCount <= 0)
+    {
+        throw std::runtime_error("Shared object rendering geometry is unavailable");
+    }
+    if (!gpuMemoryManager.Contains(BufferRole::CurrentState) ||
+        !gpuMemoryManager.Contains(BufferRole::ObjectDerived) ||
+        !gpuMemoryManager.Contains(BufferRole::ObjectRender))
+    {
+        throw std::runtime_error("Object rendering buffers are unavailable");
+    }
+
+    if (objects.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
+    {
+        throw std::length_error("Object instance count exceeds OpenGL limits");
+    }
+    const size_t validStateCount = gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
+    const size_t validDerivedCount = gpuMemoryManager.Get(BufferRole::ObjectDerived).LogicalCount();
+    const size_t validRenderCount = gpuMemoryManager.Get(BufferRole::ObjectRender).LogicalCount();
+    if (objects.size() > validStateCount || objects.size() > validDerivedCount ||
+        objects.size() > validRenderCount)
+    {
+        throw std::out_of_range("Object instance count exceeds valid GPU records");
+    }
+    // Check GPU state indices match the order of objects in the vector to ensure correct rendering.
+    for (size_t index = 0; index < objects.size(); ++index)
+    {
+        if (objects[index].gpuStateIndex != index)
+        {
+            throw std::logic_error("Object instance order does not match packed GPU state slots");
+        }
+    }
+
+    glUseProgram(objectRenderingShaderProgram);
+    gpuMemoryManager.Bind(BufferRole::CurrentState);
+    gpuMemoryManager.Bind(BufferRole::ObjectDerived);
+    gpuMemoryManager.Bind(BufferRole::ObjectRender);
+    glBindVertexArray(objectMesh.objectVAO);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, objectMesh.vertexCount,
+                          static_cast<GLsizei>(objects.size()));
+    glBindVertexArray(0);
+}
+
+std::vector<float> CreateGridVertices(float size, int divisions)
+{
+    std::vector<float> vertices;
+    int numNodesPerSide = divisions + 1;
+    vertices.reserve(numNodesPerSide * numNodesPerSide * 3);
+
+    float step = size / divisions;
+    float halfSize = size / 2.0f;
+    float baseY = -800.0f;
+
+    for (int zStep = 0; zStep <= divisions; ++zStep)
+    {
+        float z = -halfSize + zStep * step;
+        for (int xStep = 0; xStep <= divisions; ++xStep)
+        {
+            float x = -halfSize + xStep * step;
+            vertices.push_back(x);
+            vertices.push_back(baseY);
+            vertices.push_back(z);
+        }
+    }
+    return vertices;
+}
+
+std::vector<unsigned int> CreateGridIndices(int divisions)
+{
+    std::vector<unsigned int> indices;
+    int rowSize = divisions + 1;
+    size_t totalIndices = 4 * divisions * (divisions + 1);
+    indices.reserve(totalIndices);
+
+    for (int z = 0; z <= divisions; ++z)
+    {
+        for (int x = 0; x < divisions; ++x)
+        {
+            int current = z * rowSize + x;
+            indices.push_back(current);
+            indices.push_back(current + 1);
+        }
+    }
+
+    for (int z = 0; z < divisions; ++z)
+    {
+        for (int x = 0; x <= divisions; ++x)
+        {
+            int current = z * rowSize + x;
+            indices.push_back(current);
+            indices.push_back(current + rowSize);
+        }
+    }
+
+    return indices;
+}
+
+std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass)
+{
+    (void)centralMass;
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<float> radiusDist(4000.0f, 12000.0f);
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * glm::pi<float>());
+    std::uniform_real_distribution<float> massDist(1.0e20f, 3.0e23f);
+    std::uniform_real_distribution<float> speedDist(120.0f, 260.0f);
+    std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
+
+    std::vector<Object> generated;
+    generated.reserve(count);
+
+    for (int i = 0; i < count; ++i)
+    {
+        float radius = radiusDist(rng);
+        float angle = angleDist(rng);
+        float tilt = tiltDist(rng);
+        float orbitalSpeed = speedDist(rng);
+
+        glm::vec3 position(center.x + radius * std::cos(angle), center.y + radius * tilt,
+                           center.z + radius * std::sin(angle));
+        glm::vec3 velocity(-std::sin(angle) * orbitalSpeed, 0.0f, std::cos(angle) * orbitalSpeed);
+
+        float mass = massDist(rng);
+        generated.emplace_back(position, velocity, mass, 3344.0f);
+        generated.back().color =
+            glm::vec4(0.2f + 0.8f * static_cast<float>((i * 7) % 5) / 4.0f,
+                      0.2f + 0.8f * static_cast<float>((i * 11) % 5) / 4.0f,
+                      0.2f + 0.8f * static_cast<float>((i * 13) % 5) / 4.0f, 1.0f);
+    }
+
+    return generated;
+}
+
+std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomObjectCount)
+{
+    if (!objectFilePath.empty())
+    {
+        std::ifstream objectFile(objectFilePath);
+        if (!objectFile)
+        {
+            throw std::runtime_error("Unable to open object file: " + objectFilePath);
+        }
+
+        std::vector<Object> loadedObjects;
+        std::string line;
+        size_t lineNumber = 0;
+        while (std::getline(objectFile, line))
+        {
+            ++lineNumber;
+            if (line.empty() || line.front() == '#')
+            {
+                continue;
+            }
+
+            std::stringstream values(line);
+            char separator = 0;
+            float positionX = 0.0f;
+            float positionY = 0.0f;
+            float positionZ = 0.0f;
+            float velocityX = 0.0f;
+            float velocityY = 0.0f;
+            float velocityZ = 0.0f;
+            float mass = 0.0f;
+            float density = 3344.0f;
+
+            if (!(values >> positionX >> separator && separator == ',' &&
+                  values >> positionY >> separator && separator == ',' &&
+                  values >> positionZ >> separator && separator == ',' &&
+                  values >> velocityX >> separator && separator == ',' &&
+                  values >> velocityY >> separator && separator == ',' &&
+                  values >> velocityZ >> separator && separator == ',' &&
+                  values >> mass >> separator && separator == ',' && values >> density))
+            {
+                throw std::runtime_error("Invalid object data at line " +
+                                         std::to_string(lineNumber) + " in " + objectFilePath);
+            }
+
+            loadedObjects.emplace_back(glm::vec3(positionX, positionY, positionZ),
+                                       glm::vec3(velocityX, velocityY, velocityZ), mass, density);
+        }
+        return loadedObjects;
+    }
+
+    std::vector<Object> defaultObjects = {
+        Object(glm::vec3(3844, 0, 0), glm::vec3(0, 0, 228), 7.34767309e22f, 3344),
+        Object(glm::vec3(0, 0, 0), glm::vec3(0, 0, 0), 5.97219e24f, 5515)};
+    auto randomBodies =
+        CreateRandomOrbiters(randomObjectCount, glm::vec3(0.0f, 0.0f, 0.0f), 5.97219e24f);
+    defaultObjects.insert(defaultObjects.end(), randomBodies.begin(), randomBodies.end());
+    return defaultObjects;
+}
+
+// GLuint CreateObjectCellID(const std::vector<Object> &objects, GLuint &cellIDBuffer)
+// {
+//     std::vector<GLuint> cellIDs(objects.size());
+//     for (size_t i = 0; i < objects.size(); ++i)
+//     {
+//         const Object &obj = objects[i];
+//         glm::ivec3 cellIndex = glm::ivec3(
+//             static_cast<int>((obj.position.x + gridSize / 2.0f) / (gridSize / gridDivisions)),
+//             static_cast<int>((obj.position.y + gridSize / 2.0f) / (gridSize / gridDivisions)),
+//             static_cast<int>((obj.position.z + gridSize / 2.0f) / (gridSize / gridDivisions)));
+//         cellIDs[i] = static_cast<GLuint>(cellIndex.x + cellIndex.y * (gridDivisions + 1) +
+//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions +
+//                                           1));
+//     }
+
+//     glGenBuffers(1, &cellIDBuffer);
+//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, cellIDBuffer);
+//     glBufferData(GL_SHADER_STORAGE_BUFFER, cellIDs.size() * sizeof(GLuint), cellIDs.data(),
+//                  GL_STATIC_DRAW);
+//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+//     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, cellIDBuffer);
+
+//     return cellIDBuffer;
+// }

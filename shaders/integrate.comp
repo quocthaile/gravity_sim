@@ -1,0 +1,70 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct ObjectAcceleration
+{
+    vec4 acceleration;
+};
+
+struct ObjectCollision
+{
+    uint overlapCount;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState currentState[]; };
+layout(std430, binding = 1) writeonly buffer NextStateBuffer { ObjectState nextState[]; };
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer { ObjectControl controls[]; };
+layout(std430, binding = 13) readonly buffer ObjectAccelerationBuffer
+{
+    ObjectAcceleration accelerations[];
+};
+layout(std430, binding = 15) readonly buffer ObjectCollisionBuffer
+{
+    ObjectCollision collisions[];
+};
+
+uniform uint u_objectCount;
+uniform uint u_paused;
+
+void main()
+{
+    uint objectIndex = gl_GlobalInvocationID.x;
+    if (objectIndex >= u_objectCount)
+    {
+        return;
+    }
+
+    ObjectState source = currentState[objectIndex];
+    if (controls[objectIndex].initializing == 0u && u_paused == 0u)
+    {
+        vec3 velocity = source.velocity.xyz + accelerations[objectIndex].acceleration.xyz / 96.0;
+        float collisionScale = 1.0;
+        for (uint overlapIndex = 0u; overlapIndex < collisions[objectIndex].overlapCount;
+             ++overlapIndex)
+        {
+            collisionScale *= -0.2;
+        }
+        velocity *= collisionScale;
+        nextState[objectIndex].position =
+            vec4(source.position.xyz + velocity / 94.0, source.position.w);
+        nextState[objectIndex].velocity = vec4(velocity, source.velocity.w);
+        return;
+    }
+
+    nextState[objectIndex] = source;
+}

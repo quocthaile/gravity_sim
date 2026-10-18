@@ -1,0 +1,132 @@
+cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
+
+if(DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(NOT DEFINED ENV{VCPKG_ROOT} OR "$ENV{VCPKG_ROOT}" STREQUAL "")
+        message(FATAL_ERROR
+            "VCPKG_ROOT is required when CMAKE_TOOLCHAIN_FILE is set. "
+            "Set VCPKG_ROOT to the root of your vcpkg checkout."
+        )
+    endif()
+    if(NOT EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+        message(FATAL_ERROR
+            "vcpkg toolchain file not found: ${CMAKE_TOOLCHAIN_FILE}. "
+            "Check that VCPKG_ROOT points to a valid vcpkg checkout."
+        )
+    endif()
+endif()
+
+project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
+
+include(CTest)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(glfw3 CONFIG REQUIRED)
+find_package(glm CONFIG REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(OpenGL REQUIRED)
+
+set(GRAVITY_SIM_LIBS
+    glfw
+    GLEW::GLEW
+    glm::glm
+    OpenGL::GL
+)
+
+function(add_gravity_executable target)
+    add_executable(${target} ${ARGN})
+
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(${target} PRIVATE ${GRAVITY_SIM_LIBS})
+
+    target_compile_features(${target} PRIVATE cxx_std_20)
+
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        target_compile_definitions(${target} PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+        )
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra)
+    endif()
+
+    if(WIN32)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:${target}>
+                $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
+endfunction()
+
+add_gravity_executable(gravity_sim_3Dgrid
+    src/gravity_sim_3Dgrid.cpp
+    src/gravity_sim_3Dgrid_function.cpp
+    src/gpu_memory_manager.cpp
+    shaders/grid.vert
+    shaders/grid.frag
+    shaders/grid.comp
+    shaders/nbody.comp
+    shaders/integrate.comp
+    shaders/objects.vert
+    shaders/objects.frag
+)
+
+add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.vert
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.frag
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/nbody.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/integrate.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.vert
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.frag
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid>/shaders
+)
+
+add_gravity_executable(gravity_sim_3Dgrid_baseline
+    src/gravity_sim_3Dgrid_baseline.cpp
+    shaders/grid.vert
+    shaders/grid.frag
+    shaders/grid.comp
+)
+
+add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid_baseline>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.vert
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.frag
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
+        $<TARGET_FILE_DIR:gravity_sim_3Dgrid_baseline>/shaders
+)
+
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
+endif()
+
+if(BUILD_TESTING)
+    add_gravity_executable(gravity_sim_3Dgrid_phase2_validation
+        src/gravity_sim_3Dgrid_phase2_validation.cpp
+        src/gravity_sim_3Dgrid_function.cpp
+        src/gpu_memory_manager.cpp
+        shaders/nbody.comp
+        shaders/integrate.comp
+    )
+
+    add_test(NAME gravity_sim_3Dgrid_phase2_validation
+        COMMAND $<TARGET_FILE:gravity_sim_3Dgrid_phase2_validation>
+    )
+    set_tests_properties(gravity_sim_3Dgrid_phase2_validation PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()
