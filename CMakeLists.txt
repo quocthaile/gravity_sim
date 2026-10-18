@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
+if(DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(NOT DEFINED ENV{VCPKG_ROOT} OR "$ENV{VCPKG_ROOT}" STREQUAL "")
+        message(FATAL_ERROR
+            "VCPKG_ROOT is required when CMAKE_TOOLCHAIN_FILE is set. "
+            "Set VCPKG_ROOT to the root of your vcpkg checkout."
+        )
+    endif()
+    if(NOT EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+        message(FATAL_ERROR
+            "vcpkg toolchain file not found: ${CMAKE_TOOLCHAIN_FILE}. "
+            "Check that VCPKG_ROOT points to a valid vcpkg checkout."
+        )
+    endif()
+endif()
+
 project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
@@ -51,8 +66,6 @@ function(add_gravity_executable target)
     endif()
 endfunction()
 
-add_gravity_executable(3d_test src/3D_test.cpp)
-add_gravity_executable(gravity_sim src/gravity_sim.cpp)
 add_gravity_executable(gravity_sim_3Dgrid
     src/gravity_sim_3Dgrid.cpp
     src/gravity_sim_3Dgrid_function.cpp
@@ -97,7 +110,9 @@ add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
         $<TARGET_FILE_DIR:gravity_sim_3Dgrid_baseline>/shaders
 )
 
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
+endif()
 
 if(BUILD_TESTING)
     add_gravity_executable(gravity_sim_3Dgrid_phase2_validation

@@ -3,6 +3,7 @@
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
+const glm::vec3 kInitialCameraPosition(0.0f, 1000.0f, 5000.0f);
 const float kSpeedOfLight = 299792458.0; // đổi từ float qua double
 float initMass = 5.0f * pow(10, 20) / 5; // đổi từ float qua double
 int numRandomObjects = 200;
@@ -16,7 +17,7 @@ extern constexpr GLuint kGridLocalSizeY = 16;
 // Mutable simulation and camera state.
 bool running = true;
 bool pause = false;
-glm::vec3 cameraPos = glm::vec3(0.0f, 0.0f, 1.0f);
+glm::vec3 cameraPos = kInitialCameraPosition;
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
 glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
 float lastX = 400.0f;
@@ -49,25 +50,14 @@ int main()
     float epsilon = 10.0f;
 
     // Initialize OpenGL resources.
-    GLuint renderingShaderProgram = 0;
-    GLuint computeShaderProgram = 0;
-    GLuint objectRenderingShaderProgram = 0;
-    GLuint nbodyShaderProgram = 0;
-    GLuint integrateShaderProgram = 0;
-    GLint modelLoc = -1;
-    GLint objectColorLoc = -1;
-    GLint viewLoc = -1;
-    GLint objectViewLoc = -1;
-    // Initialize GLFW, create a window, and set up OpenGL context.
+    ShaderPrograms shaderPrograms;
+    ShaderUniformLocations uniformLocations;
     GLFWwindow *window = StartGLU();
-    if (window == nullptr)
-    {
-        throw std::runtime_error("Failed to initialize GLFW and create a window.");
-        return -1;
-    }
 
+    // Set up GLFW callbacks for user input and interaction.
     InitializeGlfwCallbacks(window);
-    // Pass a file path here to load objects from CSV instead of using defaults.
+
+    // Create the initial set of objects and measure the time taken for object creation.
     auto startTime = std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
     std::cout << "Object list: " << std::endl;
@@ -83,7 +73,6 @@ int main()
                   << obj.velocity.z << std::endl;
         std::cout << "   Density: " << obj.density << std::endl;
     }
-
     auto endObjectTime = std::chrono::high_resolution_clock::now();
     auto objectCreationDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
@@ -92,19 +81,14 @@ int main()
     std::cout << "Initial object count: " << objectCount << std::endl;
 
     // Create shader programs, then initialize rendering uniforms and camera position.
-    CreateShaderProgram(renderingShaderProgram, computeShaderProgram, objectRenderingShaderProgram,
-                        nbodyShaderProgram, integrateShaderProgram);
+    CreateShaderProgram(shaderPrograms);
 
-    // Initialize rendering state, including shader uniforms and camera position.
-    InitializeRenderingState(renderingShaderProgram, modelLoc, objectColorLoc, viewLoc, cameraPos);
-    glUseProgram(objectRenderingShaderProgram);
-    objectViewLoc = glGetUniformLocation(objectRenderingShaderProgram, "view");
-    const GLint objectProjectionLoc =
-        glGetUniformLocation(objectRenderingShaderProgram, "projection");
-    const glm::mat4 objectProjection =
-        glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
-    glUniformMatrix4fv(objectProjectionLoc, 1, GL_FALSE, glm::value_ptr(objectProjection));
-    InitializeObjectRenderingResources();
+    // Initialize rendering uniforms for grid and object rendering.
+    InitializeGridRenderingUniforms(shaderPrograms.gridRendering, uniformLocations);
+    InitializeObjectRenderingUniforms(shaderPrograms.objectRendering, uniformLocations);
+
+    // Create a unit sphere mesh for object rendering.
+    CreateUnitSphere();
 
     // Initialize the grid pipeline for GPU computation.
     auto startGridTime = std::chrono::high_resolution_clock::now();
@@ -163,6 +147,7 @@ int main()
     };
     captureGpuTrajectorySample();
 
+    // Main loop: runs until the window is closed or the simulation is stopped.
     int numofFrames = 0;
     while (!glfwWindowShouldClose(window) && running == true)
     {
@@ -173,12 +158,11 @@ int main()
         lastFrame = currentFrame;
 
         BeginFrame();
-        UpdateCamera(renderingShaderProgram, viewLoc, cameraPos);
-        UpdateCamera(objectRenderingShaderProgram, objectViewLoc, cameraPos);
+        UpdateCamera(shaderPrograms, uniformLocations, cameraPos);
 
         RunObjectStateSync(window, objectCount);
-        RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram, objectCount, epsilon,
-                              pause);
+        RunGpuStateTransition(shaderPrograms.nbodyCompute, shaderPrograms.integrateCompute,
+                              objectCount, epsilon, pause);
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)
         {
             captureGpuTrajectorySample();
@@ -189,11 +173,11 @@ int main()
                 saved = true;
             }
         }
-        RunGridCompute(computeShaderProgram, objectCount);
+        RunGridCompute(shaderPrograms.gridCompute, objectCount);
         // Render the deformed grid and all objects in the scene.
-        DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
+        DrawGrid(shaderPrograms.gridRendering, gridVAO, gridIndexCount, uniformLocations);
         // Render each object in the simulation.
-        DrawObjects(objectRenderingShaderProgram, objs);
+        DrawObjects(shaderPrograms.objectRendering, objs);
         // Swap buffers and poll for events.
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -225,7 +209,6 @@ int main()
     }
     // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
-    Cleanup(renderingShaderProgram, computeShaderProgram, objectRenderingShaderProgram,
-            nbodyShaderProgram, integrateShaderProgram);
+    Cleanup(shaderPrograms);
     return 0;
 }

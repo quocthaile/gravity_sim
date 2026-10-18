@@ -4,10 +4,14 @@ GRAVITY SIMULATION PROJECT DOCUMENTATION
 1. PROJECT OVERVIEW
 -------------------
 
-This project is a C++23 OpenGL gravity simulation. It contains multiple
-executables, including the main 3D grid simulation:
+This project is a C++23 OpenGL gravity simulation. It builds two production
+applications:
 
     gravity_sim_3Dgrid
+    gravity_sim_3Dgrid_baseline
+
+The Phase 2 validation executable is a separate test target enabled by
+`BUILD_TESTING`.
 
 The 3D grid simulation combines:
 
@@ -41,10 +45,10 @@ Root files:
 Source files:
 
     src/3D_test.cpp
-        Separate 3D test executable.
+        Legacy standalone 3D test source; retained but not configured as a CMake target.
 
     src/gravity_sim.cpp
-        Earlier or alternative gravity simulation implementation.
+        Earlier or alternative implementation source; retained but not configured as a CMake target.
 
     src/gravity_sim_3Dgrid.cpp
         Main entry point for the 3D grid simulation. It contains shader file
@@ -74,11 +78,11 @@ Shader files:
 
 Build output:
 
-    build/gcc-debug/
-        GCC/MinGW debug build output.
+    build/msys2-gcc-debug/
+        MSYS2 GCC/MinGW debug build output.
 
-    build/msvc-release/
-        MSVC release build output.
+    build/msvc-vs2026/Debug/
+        Visual Studio 2026 x64 debug build output.
 
 After building gravity_sim_3Dgrid, CMake copies the GLSL files into a
 shaders directory beside the executable. The application expects these paths
@@ -418,9 +422,10 @@ applicable.
 9. BUILD AND RUN NOTES
 ----------------------
 
-Configure and build the debug target with:
+Set `VCPKG_ROOT` to the root of your vcpkg checkout, then configure and build the debug target with:
 
-    cmake --build build/gcc-debug --target gravity_sim_3Dgrid
+    cmake --preset msys2-gcc-debug
+    cmake --build --preset build-msys2-gcc-debug --target gravity_sim_3Dgrid
 
 The executable must be launched with a working directory that contains the
 runtime shader paths, or from the build output directory after the CMake

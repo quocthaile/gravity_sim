@@ -1254,7 +1254,8 @@ invalid slot và 0/1/2 instances.
 ### Executed verification
 
 - Fetched branch HEAD, initial HEAD, and final HEAD: `96e9ec746f1b1eca7fc0eb028c0cc59b7c35e39e`.
-- Build configuration: CMake `gcc-release`, Release (`g++` 16.2.0, `-O3 -DNDEBUG`). The focused
+- Historical build configuration before the preset rename: former CMake preset `gcc-release`,
+  Release (`g++` 16.2.0, `-O3 -DNDEBUG`). The focused
     validation target build exited 0.
 - Build command: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation`.
 - Executable command: `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe` (exit 0).
@@ -1264,11 +1265,11 @@ invalid slot và 0/1/2 instances.
     objects / 512 capacity. Maximum errors: acceleration `6.51856e-5 m/s^2`, relative acceleration
     `3.62458e-7`, collision count `0`, position `6.98493e-10` simulation units, and velocity
     `1.30119e-7` units. The executable's final `glGetError()` check passed; no assertions failed.
-- CMake Tools `RunCtest_CMakeTools` did not launch the test and returned `Build failed`. Its
-    diagnostics identify the unchanged baseline compile error in
-    `src/gravity_sim_3Dgrid_baseline.cpp`: `'setprecision' is not a member of 'std'`. The focused
-    target build and direct validation executable passed; CTest itself remains blocked by that
-    unrelated baseline target error. The baseline source was not changed.
+- A previous CMake Tools `RunCtest_CMakeTools` attempt did not launch the test and reported a
+    baseline compile error in `src/gravity_sim_3Dgrid_baseline.cpp`: `'setprecision' is not a member
+    of 'std'`. In the preset-refactor validation, all four builds compiled, but CMake Tools again
+    returned `Build failed` before launching CTest and reported no diagnostics. CTest remains
+    unverified for this run; a successful build is not a test pass.
 
 ### Not verified / deferred
 

@@ -31,19 +31,38 @@ class Object;
 constexpr std::uint32_t kInvalidObjectId = 0;
 std::uint32_t AllocateObjectId();
 
+struct ShaderPrograms
+{
+    GLuint gridRendering = 0;
+    GLuint gridCompute = 0;
+    GLuint objectRendering = 0;
+    GLuint nbodyCompute = 0;
+    GLuint integrateCompute = 0;
+};
+
+struct ShaderUniformLocations
+{
+    GLint gridModel = -1;
+    GLint gridObjectColor = -1;
+    GLint gridView = -1;
+    GLint gridProjection = -1;
+    GLint objectView = -1;
+    GLint objectProjection = -1;
+};
+
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
-void CreateShaderProgram(GLuint &renderingShaderProgram, GLuint &computeShaderProgram,
-                         GLuint &objectRenderingShaderProgram, GLuint &nbodyShaderProgram,
-                         GLuint &integrateShaderProgram);
-void InitializeRenderingState(GLuint renderingShaderProgram, GLint &modelLocation,
-                              GLint &objectColorLocation, GLint &viewLocation,
-                              glm::vec3 &cameraPosition);
-void InitializeObjectRenderingResources();
+void CreateShaderProgram(ShaderPrograms &programs);
+// inline const glm::vec3 kInitialCameraPosition(0.0f, 1000.0f, 5000.0f);
+glm::mat4 CreateScenePerspectiveProjection();
+void InitializeGridRenderingUniforms(GLuint gridProgram, ShaderUniformLocations &uniformLocations);
+void InitializeObjectRenderingUniforms(GLuint objectProgram,
+                                       ShaderUniformLocations &uniformLocations);
+void CreateUnitSphere();
 void DestroyObjectRenderingResources();
-GLuint CreateGraphicsProgram(const char *vertexSource, const char *fragmentSource);
-GLuint CreateComputeProgram(const char *computeSource);
-GLuint CreateComputeProgramFromFile(const std::string &filePath);
+GLuint CreateGraphicsProgram(const std::string &vertexFilePath,
+                             const std::string &fragmentFilePath);
+GLuint CreateComputeProgram(const std::string &filePath);
 void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t vertexCount,
                        GLuint *ebo = nullptr, const unsigned int *indices = nullptr,
                        size_t indexCount = 0);
@@ -57,12 +76,11 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            size_t objectCount, float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
-void Cleanup(GLuint renderingShaderProgram, GLuint computeShaderProgram,
-             GLuint objectRenderingShaderProgram, GLuint nbodyShaderProgram,
-             GLuint integrateShaderProgram);
+void Cleanup(const ShaderPrograms &shaderPrograms);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
-void UpdateCamera(GLuint renderingShaderProgram, GLint viewLocation, glm::vec3 cameraPosition);
+void UpdateCamera(const ShaderPrograms &shaderPrograms,
+                  const ShaderUniformLocations &uniformLocations, glm::vec3 cameraPosition);
 void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods);
 void MouseCallback(GLFWwindow *window, double xPosition, double yPosition);
 void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
@@ -70,7 +88,7 @@ void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset);
 void InitializeGlfwCallbacks(GLFWwindow *window);
 glm::vec3 SphericalToCartesian(float radius, float theta, float phi);
 void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
-              GLint objectColorLocation);
+              const ShaderUniformLocations &uniformLocations);
 void DrawObjects(GLuint objectRenderingShaderProgram, const std::vector<Object> &objects);
 std::vector<float> CreateGridVertices(float size, int divisions);
 std::vector<unsigned int> CreateGridIndices(int divisions);

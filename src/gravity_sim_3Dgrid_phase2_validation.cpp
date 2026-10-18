@@ -469,9 +469,7 @@ int main()
                                       object.radius, object.initializing, object.launched});
         }
 
-        const std::string vertexSource = LoadShaderSource("shaders/objects.vert");
-        const std::string fragmentSource = LoadShaderSource("shaders/objects.frag");
-        renderingProgram = CreateGraphicsProgram(vertexSource.c_str(), fragmentSource.c_str());
+        renderingProgram = CreateGraphicsProgram("shaders/objects.vert", "shaders/objects.frag");
         GLint linkStatus = GL_FALSE;
         glGetProgramiv(renderingProgram, GL_LINK_STATUS, &linkStatus);
         Require(linkStatus == GL_TRUE, "Object rendering shader failed to link");
@@ -488,7 +486,7 @@ int main()
         Require(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
                 "Unable to create the object-render validation framebuffer");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        InitializeObjectRenderingResources();
+        CreateUnitSphere();
 
         ComputePipeline({glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)});
         objectGpuState(0, objs.size());
@@ -512,8 +510,8 @@ int main()
         }
         Require(invalidStateRejected, "DrawObjects accepted an out-of-range GPU state slot");
         DrawObjects(renderingProgram, {});
-        nbodyProgram = CreateComputeProgramFromFile("shaders/nbody.comp");
-        integrateProgram = CreateComputeProgramFromFile("shaders/integrate.comp");
+        nbodyProgram = CreateComputeProgram("shaders/nbody.comp");
+        integrateProgram = CreateComputeProgram("shaders/integrate.comp");
 
         constexpr float epsilon = 10.0f;
         const GLuint currentHandleBeforeZeroDispatch =
