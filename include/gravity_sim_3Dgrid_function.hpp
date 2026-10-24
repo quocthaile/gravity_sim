@@ -50,9 +50,25 @@ struct ShaderUniformLocations
     GLint objectProjection = -1;
 };
 
+struct ComputeUniformLocations
+{
+    GLint nbodyObjectCount = -1;
+    GLint nbodyGravitationalConstant = -1;
+    GLint nbodyEpsilon = -1;
+
+    GLint integrateObjectCount = -1;
+    GLint integratePaused = -1;
+
+    GLint gridObjectCount = -1;
+    GLint gridWidth = -1;
+    GLint gridHeight = -1;
+};
+
 GLFWwindow *StartGLU();
 std::string LoadShaderSource(const std::string &filePath);
 void CreateShaderProgram(ShaderPrograms &programs);
+void InitializeComputeUniformLocations(const ShaderPrograms &programs,
+                                       ComputeUniformLocations &locations);
 // inline const glm::vec3 kInitialCameraPosition(0.0f, 1000.0f, 5000.0f);
 glm::mat4 CreateScenePerspectiveProjection();
 void InitializeGridRenderingUniforms(GLuint gridProgram, ShaderUniformLocations &uniformLocations);
@@ -70,12 +86,16 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
-void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon);
-void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused);
+void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                     size_t objectCount, float epsilon);
+void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                    size_t objectCount, bool paused);
 void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
-                           size_t objectCount, float epsilon, bool paused);
-void RunGridCompute(GLuint computeShaderProgram, size_t objectCount);
+                           const ComputeUniformLocations &locations, size_t objectCount,
+                           float epsilon, bool paused);
+void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                    size_t objectCount);
 void Cleanup(const ShaderPrograms &shaderPrograms);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);

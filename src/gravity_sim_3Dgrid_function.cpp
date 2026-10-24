@@ -110,6 +110,39 @@ void CreateShaderProgram(ShaderPrograms &shaderPrograms)
     shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
 }
 
+void InitializeComputeUniformLocations(const ShaderPrograms &programs,
+                                       ComputeUniformLocations &locations)
+{
+    const auto getRequiredLocation = [](GLuint program, const char *programName,
+                                        const char *uniformName) -> GLint
+    {
+        const GLint location = glGetUniformLocation(program, uniformName);
+        if (location == -1)
+        {
+            throw std::runtime_error("Required uniform '" + std::string(uniformName) +
+                                     "' not found in compute program '" + programName + "'");
+        }
+        return location;
+    };
+
+    locations.nbodyObjectCount =
+        getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_objectCount");
+    locations.nbodyGravitationalConstant = getRequiredLocation(
+        programs.nbodyCompute, "nbodyCompute", "u_gravitationalConstant");
+    locations.nbodyEpsilon = getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_epsilon");
+
+    locations.integrateObjectCount =
+        getRequiredLocation(programs.integrateCompute, "integrateCompute", "u_objectCount");
+    locations.integratePaused =
+        getRequiredLocation(programs.integrateCompute, "integrateCompute", "u_paused");
+
+    locations.gridObjectCount =
+        getRequiredLocation(programs.gridCompute, "gridCompute", "u_objectCount");
+    locations.gridWidth = getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridWidth");
+    locations.gridHeight =
+        getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridHeight");
+}
+
 glm::mat4 CreateScenePerspectiveProjection()
 {
     return glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
@@ -705,7 +738,8 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
                              sizeof(glm::vec4), gridVertices.size()});
 }
 
-void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsilon)
+void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                     size_t objectCount, float epsilon)
 {
     if (objectCount == 0)
     {
@@ -714,12 +748,13 @@ void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsi
 
     constexpr GLuint localSizeX = 64;
     const GLuint groupCountX = static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+
     glUseProgram(computeShaderProgram);
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
-                 static_cast<GLuint>(objectCount));
-    glUniform1d(glGetUniformLocation(computeShaderProgram, "u_gravitationalConstant"),
-                kGravitationalConstant);
-    glUniform1f(glGetUniformLocation(computeShaderProgram, "u_epsilon"), epsilon);
+
+    glUniform1ui(locations.nbodyObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1d(locations.nbodyGravitationalConstant, kGravitationalConstant);
+    glUniform1f(locations.nbodyEpsilon, epsilon);
+
     glDispatchCompute(groupCountX, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
@@ -732,7 +767,8 @@ void RunNBodyCompute(GLuint computeShaderProgram, size_t objectCount, float epsi
     }
 }
 
-void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused)
+void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                    size_t objectCount, bool paused)
 {
     if (objectCount == 0)
     {
@@ -742,10 +778,8 @@ void RunIntegration(GLuint computeShaderProgram, size_t objectCount, bool paused
     constexpr GLuint localSizeX = 64;
     const GLuint groupCountX = static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
     glUseProgram(computeShaderProgram);
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
-                 static_cast<GLuint>(objectCount));
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_paused"),
-                 static_cast<GLuint>(paused));
+    glUniform1ui(locations.integrateObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1ui(locations.integratePaused, static_cast<GLuint>(paused));
     glDispatchCompute(groupCountX, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
@@ -771,16 +805,21 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount)
 }
 
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
-                           size_t objectCount, float epsilon, bool paused)
+                           const ComputeUniformLocations &locations, size_t objectCount,
+                           float epsilon, bool paused)
 {
     if (objectCount == 0)
     {
         return;
     }
 
+    // Ensure that any CPU writes to persistently mapped buffers are visible to the GPU before running
     glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
-    RunNBodyCompute(nbodyShaderProgram, objectCount, epsilon);
-    RunIntegration(integrateShaderProgram, objectCount, paused);
+    // Run the N-body compute shader to calculate accelerations based on current positions and masses.
+    RunNBodyCompute(nbodyShaderProgram, locations, objectCount, epsilon);
+    // Run the integration compute shader
+    RunIntegration(integrateShaderProgram, locations, objectCount, paused);
+    // Ping-pong the current and next state buffers for the next frame's computations.
     gpuMemoryManager.SwapCurrentNext();
 
     static bool reportedRoles = false;
@@ -794,15 +833,15 @@ void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProg
     }
 }
 
-void RunGridCompute(GLuint computeShaderProgram, size_t objectCount)
+void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                    size_t objectCount)
 {
     glUseProgram(computeShaderProgram);
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_objectCount"),
-                 static_cast<GLuint>(objectCount));
+    glUniform1ui(locations.gridObjectCount, static_cast<GLuint>(objectCount));
     const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
     const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridWidth"), gridWidth);
-    glUniform1ui(glGetUniformLocation(computeShaderProgram, "u_gridHeight"), gridHeight);
+    glUniform1ui(locations.gridWidth, gridWidth);
+    glUniform1ui(locations.gridHeight, gridHeight);
     // Round up work group counts
     const GLuint groupCountX = (gridWidth + kGridLocalSizeX - 1) / kGridLocalSizeX;
     const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;

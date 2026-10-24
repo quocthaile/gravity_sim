@@ -44,10 +44,10 @@ Root files:
 
 Source files:
 
-    src/3D_test.cpp
+    src/legacy/3D_test.cpp
         Legacy standalone 3D test source; retained but not configured as a CMake target.
 
-    src/gravity_sim.cpp
+    src/legacy/gravity_sim.cpp
         Earlier or alternative implementation source; retained but not configured as a CMake target.
 
     src/gravity_sim_3Dgrid.cpp
@@ -465,5 +465,4 @@ threadIdx                gl_LocalInvocationID
 blockIdx                 gl_WorkGroupID
 blockDim                 gl_WorkGroupSize
 gridDim                  Không có biến tương đương trực tiếp
-
 

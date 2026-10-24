@@ -94,10 +94,11 @@ void ValidateObjectBufferLayout(size_t expectedCount)
     }
 }
 
-void RunCountedTransition(GLuint nbodyProgram, GLuint integrateProgram, size_t objectCount,
+void RunCountedTransition(GLuint nbodyProgram, GLuint integrateProgram,
+                          const ComputeUniformLocations &locations, size_t objectCount,
                           float epsilon, bool paused, size_t &transitionCount)
 {
-    RunGpuStateTransition(nbodyProgram, integrateProgram, objectCount, epsilon, paused);
+    RunGpuStateTransition(nbodyProgram, integrateProgram, locations, objectCount, epsilon, paused);
     ++transitionCount;
 }
 
@@ -405,7 +406,8 @@ void ValidateGpuState(const std::vector<ReferenceObject> &referenceState,
 }
 
 void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbodyProgram,
-                        GLuint integrateProgram, GLuint framebuffer, GLuint colorTexture)
+                        GLuint integrateProgram, GLuint gridComputeProgram, GLuint framebuffer,
+                        GLuint colorTexture)
 {
     DestroyObjectRenderingResources();
     glDeleteFramebuffers(1, &framebuffer);
@@ -414,6 +416,7 @@ void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbod
     glDeleteProgram(renderingProgram);
     glDeleteProgram(nbodyProgram);
     glDeleteProgram(integrateProgram);
+    glDeleteProgram(gridComputeProgram);
     if (window != nullptr)
     {
         glfwDestroyWindow(window);
@@ -431,6 +434,8 @@ int main()
     GLuint validationColorTexture = 0;
     GLuint nbodyProgram = 0;
     GLuint integrateProgram = 0;
+    GLuint gridComputeProgram = 0;
+    ComputeUniformLocations computeUniformLocations;
     try
     {
 #if defined(NDEBUG)
@@ -512,13 +517,20 @@ int main()
         DrawObjects(renderingProgram, {});
         nbodyProgram = CreateComputeProgram("shaders/nbody.comp");
         integrateProgram = CreateComputeProgram("shaders/integrate.comp");
+        gridComputeProgram = CreateComputeProgram("shaders/grid.comp");
+        ShaderPrograms computePrograms;
+        computePrograms.nbodyCompute = nbodyProgram;
+        computePrograms.integrateCompute = integrateProgram;
+        computePrograms.gridCompute = gridComputeProgram;
+        InitializeComputeUniformLocations(computePrograms, computeUniformLocations);
 
         constexpr float epsilon = 10.0f;
         const GLuint currentHandleBeforeZeroDispatch =
             gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
         const GLuint nextHandleBeforeZeroDispatch =
             gpuMemoryManager.Get(BufferRole::NextState).Handle();
-        RunGpuStateTransition(nbodyProgram, integrateProgram, 0, epsilon, false);
+        RunGpuStateTransition(nbodyProgram, integrateProgram, computeUniformLocations, 0, epsilon,
+                              false);
         Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() ==
                         currentHandleBeforeZeroDispatch &&
                     gpuMemoryManager.Get(BufferRole::NextState).Handle() ==
@@ -541,8 +553,8 @@ int main()
         }
         const std::vector<AccelerationSample> zeroInteractionAccelerations =
             AdvanceReference(referenceState, epsilon, false);
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, false, transitionCount);
         ValidateGpuState(referenceState, zeroInteractionAccelerations, transitionCount,
                          validationMetrics);
         const auto *zeroInteractionCollision =
@@ -574,8 +586,8 @@ int main()
                 gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
             const GLuint nextHandleBefore = gpuMemoryManager.Get(BufferRole::NextState).Handle();
 
-            RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                                 transitionCount);
+            RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations,
+                                 objectCount, epsilon, false, transitionCount);
             gpuMemoryManager.FenceGpuCompletion();
 
             Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == nextHandleBefore &&
@@ -643,8 +655,8 @@ int main()
                                 expectedWithoutInitializingObject[index].acceleration) < 1.0e-7f,
                     "Initializing object affected the reference physics of an existing body");
         }
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, false, transitionCount);
         gpuMemoryManager.FenceGpuCompletion();
         positionChecksum +=
             MeasureFenceAndMappedPositionRead(objectCount, totalFenceWait, totalMappedRead);
@@ -697,8 +709,8 @@ int main()
                     launchedAccelerations[1].collisionCount == 1 &&
                     launchedAccelerations.back().collisionCount == 2,
                 "Actual-radius geometry did not produce the expected one/two overlaps");
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, false, transitionCount);
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                    renderMetrics);
         ValidateGpuState(referenceState, launchedAccelerations, transitionCount, validationMetrics);
@@ -739,8 +751,8 @@ int main()
             AdvanceReference(referenceState, epsilon, true);
         Require(glm::length(pausedAccelerations.back().acceleration) > 1.0e-6f,
                 "Paused acceleration diagnostic was unexpectedly empty");
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, true,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, true, transitionCount);
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                    renderMetrics);
         gpuMemoryManager.WaitForGpuCompletion();
@@ -761,8 +773,8 @@ int main()
 
         const std::vector<AccelerationSample> resumedAccelerations =
             AdvanceReference(referenceState, epsilon, false);
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, false, transitionCount);
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                    renderMetrics);
         ValidateGpuState(referenceState, resumedAccelerations, transitionCount, validationMetrics);
@@ -860,8 +872,8 @@ int main()
 
         const std::vector<AccelerationSample> growthAccelerations =
             AdvanceReference(referenceState, epsilon, false);
-        RunCountedTransition(nbodyProgram, integrateProgram, objectCount, epsilon, false,
-                             transitionCount);
+        RunCountedTransition(nbodyProgram, integrateProgram, computeUniformLocations, objectCount,
+                             epsilon, false, transitionCount);
         gpuMemoryManager.FenceGpuCompletion();
         ValidateObjectBufferLayout(objectCount);
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
@@ -889,7 +901,7 @@ int main()
         const GLenum glError = glGetError();
         Require(glError == GL_NO_ERROR, "OpenGL reported an error during GPU validation");
         ShutdownValidation(window, renderingProgram, nbodyProgram, integrateProgram,
-                           validationFramebuffer, validationColorTexture);
+                           gridComputeProgram, validationFramebuffer, validationColorTexture);
         std::cout << "Validation scenarios: two-body acceleration, zero interaction, "
                   << "single and multiple overlap parity, zero-object dispatch, 8-step ping-pong, "
                   << "pause/resume, initializing exclusion and launch, "
@@ -912,7 +924,7 @@ int main()
     {
         std::cerr << "Phase 2 GPU validation failed: " << error.what() << std::endl;
         ShutdownValidation(window, renderingProgram, nbodyProgram, integrateProgram,
-                           validationFramebuffer, validationColorTexture);
+                           gridComputeProgram, validationFramebuffer, validationColorTexture);
         return 1;
     }
 }

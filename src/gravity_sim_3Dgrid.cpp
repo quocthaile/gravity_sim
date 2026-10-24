@@ -52,6 +52,7 @@ int main()
     // Initialize OpenGL resources.
     ShaderPrograms shaderPrograms;
     ShaderUniformLocations uniformLocations;
+    ComputeUniformLocations computeUniformLocations;
     GLFWwindow *window = StartGLU();
 
     // Set up GLFW callbacks for user input and interaction.
@@ -82,6 +83,7 @@ int main()
 
     // Create shader programs, then initialize rendering uniforms and camera position.
     CreateShaderProgram(shaderPrograms);
+    InitializeComputeUniformLocations(shaderPrograms, computeUniformLocations);
 
     // Initialize rendering uniforms for grid and object rendering.
     InitializeGridRenderingUniforms(shaderPrograms.gridRendering, uniformLocations);
@@ -162,7 +164,7 @@ int main()
 
         RunObjectStateSync(window, objectCount);
         RunGpuStateTransition(shaderPrograms.nbodyCompute, shaderPrograms.integrateCompute,
-                              objectCount, epsilon, pause);
+                              computeUniformLocations, objectCount, epsilon, pause);
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)
         {
             captureGpuTrajectorySample();
@@ -173,7 +175,7 @@ int main()
                 saved = true;
             }
         }
-        RunGridCompute(shaderPrograms.gridCompute, objectCount);
+        RunGridCompute(shaderPrograms.gridCompute, computeUniformLocations, objectCount);
         // Render the deformed grid and all objects in the scene.
         DrawGrid(shaderPrograms.gridRendering, gridVAO, gridIndexCount, uniformLocations);
         // Render each object in the simulation.
