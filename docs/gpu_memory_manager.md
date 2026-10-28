@@ -106,14 +106,16 @@ BaseGrid + CurrentState/ObjectDerived -> grid.comp -> DeformedGrid
 
 ## Validation status
 
-The `gravity_sim_3Dgrid_phase2_validation` executable creates a hidden OpenGL 4.4 context, compiles
-and links the compute/render shaders, and renders into an offscreen framebuffer. It checks GPU
+The archived validation harness at `src/legacy/gravity_sim_3Dgrid_phase2_validation.cpp` created a
+hidden OpenGL 4.4 context, compiled and linked the compute/render shaders, and rendered into an
+offscreen framebuffer. It checked GPU
 positions with deliberately stale CPU positions, scale/color, zero/one/two instances, and invalid
 slots. Its independent snapshot CPU oracle covers two-body acceleration, zero interaction and
 zero-object dispatch, acceleration and overlap-count output, 8-step ping-pong, single/multiple
 collision parity, exact paused and initializing-state preservation, initializing exclusion and
 launch, append without resize, and growth from 256 to 512 with preservation and
 logical-count/capacity/binding checks across all eight per-object buffers.
+This source is retained for reference but is no longer built by CMake or registered with CTest.
 
 The oracle is only for shader/state-contract correctness. No trajectory equivalence or matched
 baseline result is claimed: the legacy baseline's force softening, integration, collision, and
@@ -123,7 +125,7 @@ update-order semantics differ. Baseline comparison and performance measurement a
 
 - **Implemented:** one shared unit-sphere VAO/VBO, one `glDrawArraysInstanced()` batch, active-state SSBO lookup at binding 0, visual scale at binding 12, and color at binding 14.
 - **Test coverage:** hidden-context FBO checks for GPU position, scale/color, stale CPU positions, invalid slots, and 0/1/2 instances; compute checks cover collision, pause/resume, init/launch, append, and capacity growth.
-- **Executed before the preset rename:** CMake GCC Release validation target build succeeded (`g++` 16.2.0, `-O3 -DNDEBUG`). The historical commands used the former `build/gcc-release` directory: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation` and `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe`. The executable exited 0 on OpenGL `4.4.0 - Build 32.0.101.7085`, `Intel(R) UHD Graphics` / `Intel`; 14 transitions and 14 oracle checkpoints passed. Maximum errors: acceleration `6.51856e-5 m/s^2`, relative acceleration `3.62458e-7`, collision count `0`, position `6.98493e-10` simulation units, and velocity `1.30119e-7` units. Its final GL error check passed.
+- **Historical result (when the target was still in CMake):** CMake GCC Release validation target build succeeded (`g++` 16.2.0, `-O3 -DNDEBUG`). The former commands used `build/gcc-release`: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation` and `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe`. The executable exited 0 on OpenGL `4.4.0 - Build 32.0.101.7085`, `Intel(R) UHD Graphics` / `Intel`; 14 transitions and 14 oracle checkpoints passed. Maximum errors: acceleration `6.51856e-5 m/s^2`, relative acceleration `3.62458e-7`, collision count `0`, position `6.98493e-10` simulation units, and velocity `1.30119e-7` units. Its final GL error check passed. The target is no longer available in the current CMake configuration.
 - **CTest status:** A previous CMake Tools attempt reported a baseline `std::setprecision` compile error. In the preset-refactor validation, all four builds compiled, but CMake Tools `RunCtest_CMakeTools` again returned `Build failed` before test launch and reported no diagnostics. CTest remains unverified; a successful build is not a test pass.
 - **Not verified:** interactive camera/control behavior, full-application visual inspection, large-scene performance, or a matched baseline comparison. FBO checks use a hidden context and 128x128 target.
 - **Deferred:** Mass Accumulation, Gaussian Blur, Dynamic Grid/Field LOD, non-sphere geometry batches, compaction/indirect drawing, and culling/LOD.

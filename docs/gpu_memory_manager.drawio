@@ -1,6 +1,6 @@
-<mxfile host="Electron" pages="3">
+<mxfile host="Electron" pages="4">
   <diagram id="J1UsOU0u7H9rKUIx8fgn" name="class GMemory">
-    <mxGraphModel dx="1214" dy="938" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="1387" dy="980" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -13,8 +13,8 @@
         <mxCell id="nr27joB4SLp5pt1ReJ9Y-59" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=15;fillColor=#ffe6cc;strokeColor=#d79b00;" value="object" vertex="1">
           <mxGeometry height="630" width="154" x="50" y="60" as="geometry" />
         </mxCell>
-        <mxCell id="nr27joB4SLp5pt1ReJ9Y-49" parent="1" style="whiteSpace=wrap;html=1;align=left;fontSize=14;spacingLeft=10;" value="&lt;div&gt;&lt;b&gt;SSBO binding points&lt;/b&gt;&lt;/div&gt;&lt;div&gt;0&amp;nbsp; CurrentState&lt;/div&gt;&lt;div&gt;1&amp;nbsp; NextState&lt;/div&gt;&lt;div&gt;2&amp;nbsp; ObjectPhysical&lt;/div&gt;&lt;div&gt;3&amp;nbsp; ObjectControl&lt;/div&gt;&lt;div&gt;4&amp;nbsp; BaseGrid&lt;/div&gt;&lt;div&gt;5&amp;nbsp; DeformedGrid&lt;/div&gt;&lt;div&gt;6&amp;nbsp; MassField&lt;/div&gt;&lt;div&gt;7&amp;nbsp; BlurFieldA&lt;/div&gt;&lt;div&gt;8&amp;nbsp; BlurFieldB&lt;/div&gt;&lt;div&gt;9&amp;nbsp; AccelerationField&lt;/div&gt;&lt;div&gt;10 LODMetadata&lt;/div&gt;&lt;div&gt;11 Metrics&lt;/div&gt;&lt;div&gt;12 ObjectDerived&lt;/div&gt;&lt;div&gt;13 ObjectAcceleration&lt;/div&gt;&lt;div&gt;14 ObjectRender&lt;/div&gt;" vertex="1">
-          <mxGeometry height="355" width="166" x="580" y="62.5" as="geometry" />
+        <mxCell id="nr27joB4SLp5pt1ReJ9Y-49" parent="1" style="whiteSpace=wrap;html=1;align=left;fontSize=14;spacingLeft=10;" value="&lt;div&gt;&lt;b&gt;SSBO binding points&lt;/b&gt;&lt;/div&gt;&lt;div&gt;0&amp;nbsp; CurrentState&lt;/div&gt;&lt;div&gt;1&amp;nbsp; NextState&lt;/div&gt;&lt;div&gt;2&amp;nbsp; ObjectPhysical&lt;/div&gt;&lt;div&gt;3&amp;nbsp; ObjectControl&lt;/div&gt;&lt;div&gt;4&amp;nbsp; BaseGrid&lt;/div&gt;&lt;div&gt;5&amp;nbsp; DeformedGrid&lt;/div&gt;&lt;div&gt;6&amp;nbsp; MassField&lt;/div&gt;&lt;div&gt;7&amp;nbsp; BlurFieldA&lt;/div&gt;&lt;div&gt;8&amp;nbsp; BlurFieldB&lt;/div&gt;&lt;div&gt;9&amp;nbsp; AccelerationField&lt;/div&gt;&lt;div&gt;10 LODMetadata&lt;/div&gt;&lt;div&gt;11 Metrics&lt;/div&gt;&lt;div&gt;12 ObjectDerived&lt;/div&gt;&lt;div&gt;13 ObjectAcceleration&lt;/div&gt;&lt;div&gt;14 ObjectRender&lt;/div&gt;&lt;div&gt;15&amp;nbsp;ObjectCollision&lt;/div&gt;" vertex="1">
+          <mxGeometry height="355" width="166" x="580" y="70" as="geometry" />
         </mxCell>
         <mxCell id="nr27joB4SLp5pt1ReJ9Y-82" edge="1" parent="1" source="nr27joB4SLp5pt1ReJ9Y-60" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;jumpStyle=arc;" target="nr27joB4SLp5pt1ReJ9Y-79">
           <mxGeometry relative="1" as="geometry" />
@@ -492,8 +492,8 @@
       </root>
     </mxGraphModel>
   </diagram>
-  <diagram id="SIZjIEthb3GEXCBVS-pK" name="program flow">
-    <mxGraphModel dx="1740" dy="1229" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2336" pageHeight="1654" math="0" shadow="0">
+  <diagram id="SIZjIEthb3GEXCBVS-pK" name="main() flow">
+    <mxGraphModel dx="3627" dy="2048" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2336" pageHeight="1654" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -553,6 +553,51 @@
         </mxCell>
         <mxCell id="xFfKwssOsQmJ-fyrxcOG-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Cleanup" vertex="1">
           <mxGeometry height="60" width="225" x="417.5" y="1210" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="xzyrEec39hqsoK5VJPjV" name="Frame flow">
+    <mxGraphModel dx="1740" dy="1229" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2336" pageHeight="1654" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-3" edge="1" parent="1" source="JFvQlu3A1F4Rim9jV4YV-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=16;" target="JFvQlu3A1F4Rim9jV4YV-2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;roundedPerimeter=1;fontSize=16;" value="&lt;b&gt;&lt;font style=&quot;font-size: 23px;&quot;&gt;CPU — &lt;code style=&quot;&quot;&gt;RunObjectStateSync()&lt;/code&gt;&lt;/font&gt;&lt;/b&gt;&lt;div&gt;&lt;code&gt;Ghi các dữ liệu đầu vào có thay đổi&lt;/code&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="110" width="380" x="830" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-5" edge="1" parent="1" source="JFvQlu3A1F4Rim9jV4YV-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=16;" target="JFvQlu3A1F4Rim9jV4YV-4" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-6" connectable="0" parent="JFvQlu3A1F4Rim9jV4YV-5" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=16;" value="GL_SHADER_STORAGE_BARRIER_BIT" vertex="1">
+          <mxGeometry relative="1" x="-0.1478" y="-1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;roundedPerimeter=1;fontSize=16;" value="&lt;font style=&quot;font-size: 23px;&quot;&gt;&lt;b&gt;nbody.comp&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;div&gt;&lt;p&gt;Đọc:&amp;nbsp;&lt;code&gt;CurrentState&lt;/code&gt;, &lt;code&gt;ObjectPhysical&lt;/code&gt;, &lt;code&gt;ObjectControl&lt;/code&gt;, &lt;code&gt;ObjectDerived&lt;/code&gt;&lt;/p&gt;&lt;div&gt;&lt;/div&gt;&lt;p&gt;Ghi:&amp;nbsp;&lt;code&gt;ObjectAcceleration&lt;/code&gt;, &lt;code&gt;ObjectCollision&lt;/code&gt;&lt;/p&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="170" width="380" x="830" y="590" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-8" edge="1" parent="1" source="JFvQlu3A1F4Rim9jV4YV-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=16;" target="JFvQlu3A1F4Rim9jV4YV-7" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-9" connectable="0" parent="JFvQlu3A1F4Rim9jV4YV-8" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=16;" value="GL_SHADER_STORAGE_BARRIER_BIT" vertex="1">
+          <mxGeometry relative="1" x="0.05" y="-2" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;roundedPerimeter=1;fontSize=16;fontFamily=Helvetica;fontColor=default;fontStyle=0;align=center;verticalAlign=middle;" value="&lt;font style=&quot;font-size: 23px;&quot;&gt;&lt;b&gt;integrate.comp&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;div&gt;&lt;p&gt;Đọc:&amp;nbsp;&lt;code&gt;CurrentState&lt;/code&gt;, &lt;code&gt;ObjectAcceleration&lt;/code&gt;, &lt;code&gt;ObjectCollision&lt;/code&gt;, &lt;code&gt;ObjectControl&lt;/code&gt;&lt;/p&gt;&lt;div&gt;&lt;/div&gt;&lt;p&gt;Ghi:&amp;nbsp;&lt;code&gt;NextState&lt;/code&gt;&lt;/p&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="180" width="380" x="830" y="840" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-11" edge="1" parent="1" source="JFvQlu3A1F4Rim9jV4YV-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=16;" target="JFvQlu3A1F4Rim9jV4YV-10" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;roundedPerimeter=1;fontSize=16;" value="&lt;p&gt;&lt;code&gt;&lt;font style=&quot;font-size: 23px;&quot;&gt;&lt;b&gt;SwapCurrentNext()&lt;/b&gt;&lt;/font&gt;&lt;/code&gt;&lt;/p&gt;&lt;p&gt;Hoán đổi các GPU buffer handle tương ứng với hai role&lt;/p&gt;" vertex="1">
+          <mxGeometry height="110" width="380" x="830" y="1158" as="geometry" />
+        </mxCell>
+        <mxCell id="JFvQlu3A1F4Rim9jV4YV-10" parent="1" style="rounded=1;whiteSpace=wrap;html=1;roundedPerimeter=1;fontSize=16;" value="&lt;p&gt;&lt;b&gt;&lt;font style=&quot;font-size: 23px;&quot;&gt;&lt;code style=&quot;&quot;&gt;grid.comp&lt;/code&gt; + &lt;code style=&quot;&quot;&gt;objects.vert&lt;/code&gt;&lt;/font&gt;&lt;/b&gt;&lt;/p&gt;&lt;p&gt;Sử dụng &lt;code&gt;CurrentState&lt;/code&gt; mới để tính grid và render objects&lt;/p&gt;" vertex="1">
+          <mxGeometry height="152" width="380" x="830" y="1348" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

@@ -833,6 +833,25 @@ void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProg
     }
 }
 
+void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions)
+{
+    gpuMemoryManager.WaitForGpuCompletion();
+    const auto *gpuState =
+        gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    if (gpuState == nullptr)
+    {
+        throw std::runtime_error("CurrentState mapping is unavailable for trajectory export");
+    }
+
+    const size_t gpuObjectCount = gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
+    positions.emplace_back();
+    positions.back().reserve(gpuObjectCount);
+    for (size_t index = 0; index < gpuObjectCount; ++index)
+    {
+        positions.back().emplace_back(gpuState[index].position);
+    }
+}
+
 void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                     size_t objectCount)
 {

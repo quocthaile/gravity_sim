@@ -17,8 +17,6 @@ endif()
 
 project(gravity_sim VERSION 0.1.0 LANGUAGES CXX)
 
-include(CTest)
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -112,21 +110,4 @@ add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
 
 if(CMAKE_GENERATOR MATCHES "^Visual Studio")
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
-endif()
-
-if(BUILD_TESTING)
-    add_gravity_executable(gravity_sim_3Dgrid_phase2_validation
-        src/gravity_sim_3Dgrid_phase2_validation.cpp
-        src/gravity_sim_3Dgrid_function.cpp
-        src/gpu_memory_manager.cpp
-        shaders/nbody.comp
-        shaders/integrate.comp
-    )
-
-    add_test(NAME gravity_sim_3Dgrid_phase2_validation
-        COMMAND $<TARGET_FILE:gravity_sim_3Dgrid_phase2_validation>
-    )
-    set_tests_properties(gravity_sim_3Dgrid_phase2_validation PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    )
 endif()

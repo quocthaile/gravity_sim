@@ -87,6 +87,6 @@ while (!glfwWindowShouldClose(window) && running)
 
 ## Ghi chú
 
-- Các hàm con (`UpdateInitializingObject`, `SynchronizeObjectStateBuffers`, `SynchronizeObjectGpuProperties`) vẫn được giữ public. Ví dụ, `gravity_sim_3Dgrid_phase2_validation.cpp` gọi trực tiếp `SynchronizeObjectStateBuffers`.
+- Các hàm con (`UpdateInitializingObject`, `SynchronizeObjectStateBuffers`, `SynchronizeObjectGpuProperties`) vẫn được giữ public. Ví dụ validation đã lưu trữ tại `src/legacy/gravity_sim_3Dgrid_phase2_validation.cpp` gọi trực tiếp `SynchronizeObjectStateBuffers`.
 - Hàm không phát sinh chi phí đồng bộ GPU nếu không có thay đổi. Bước 2 chỉ chạy khi số object đổi; bước 3 chỉ ghi khi dữ liệu thực sự khác.
 - Xem thêm mô hình buffer và binding trong [gpu_memory_manager.md](gpu_memory_manager.md).

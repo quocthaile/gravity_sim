@@ -760,7 +760,8 @@ src/gravity_sim_3Dgrid_baseline.cpp
 
 Ba loại output phải được giữ riêng:
 
-1. **Shader correctness:** `gravity_sim_3Dgrid_phase2_validation` so sánh net gravitational
+1. **Shader correctness:** Harness đã lưu trữ tại
+    `src/legacy/gravity_sim_3Dgrid_phase2_validation.cpp` từng so sánh net gravitational
     acceleration, collision overlap count, position và velocity của GPU với CPU oracle độc lập trên
     cùng immutable timestep snapshot. Oracle tính pair interactions trên CPU rồi tích phân từ
     acceleration/count riêng; baseline không được dùng làm oracle.
@@ -1257,8 +1258,9 @@ invalid slot và 0/1/2 instances.
 - Historical build configuration before the preset rename: former CMake preset `gcc-release`,
   Release (`g++` 16.2.0, `-O3 -DNDEBUG`). The focused
     validation target build exited 0.
-- Build command: `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation`.
-- Executable command: `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe` (exit 0).
+- Historical build command, from before the target was removed from CMake:
+  `cmake --build build/gcc-release --target gravity_sim_3Dgrid_phase2_validation`.
+- Historical executable: `build/gcc-release/gravity_sim_3Dgrid_phase2_validation.exe` (exit 0).
 - Context: requested OpenGL 4.4; actual version `4.4.0 - Build 32.0.101.7085`; renderer
     `Intel(R) UHD Graphics`; vendor `Intel`.
 - The executable passed 14 state transitions and 14 oracle checkpoints, ending at 257 logical

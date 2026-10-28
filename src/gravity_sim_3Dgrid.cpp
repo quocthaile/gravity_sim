@@ -129,25 +129,7 @@ int main()
     bool saved = false;
 
     // Capture the initial GPU state for trajectory export.
-    const auto captureGpuTrajectorySample = [&]()
-    {
-        gpuMemoryManager.WaitForGpuCompletion();
-        const auto *gpuState =
-            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
-        if (gpuState == nullptr)
-        {
-            throw std::runtime_error("CurrentState mapping is unavailable for trajectory export");
-        }
-
-        const size_t gpuObjectCount = gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
-        positions.emplace_back();
-        positions.back().reserve(gpuObjectCount);
-        for (size_t index = 0; index < gpuObjectCount; ++index)
-        {
-            positions.back().emplace_back(gpuState[index].position);
-        }
-    };
-    captureGpuTrajectorySample();
+    CaptureGpuTrajectorySample(positions);
 
     // Main loop: runs until the window is closed or the simulation is stopped.
     int numofFrames = 0;
@@ -167,7 +149,7 @@ int main()
                               computeUniformLocations, objectCount, epsilon, pause);
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)
         {
-            captureGpuTrajectorySample();
+            CaptureGpuTrajectorySample(positions);
             if (positions.size() >= trajectorySampleCount)
             {
                 SavePositions("numerical_error/optimized_positions.csv", positions,

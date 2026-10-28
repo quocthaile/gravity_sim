@@ -96,6 +96,7 @@ void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProg
                            float epsilon, bool paused);
 void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                     size_t objectCount);
+void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions);
 void Cleanup(const ShaderPrograms &shaderPrograms);
 void BeginFrame();
 void UpdateInitializingObject(GLFWwindow *window);
