@@ -1,18 +1,72 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 
+#include "render/asset_paths.hpp"
+#include "render/shared_grid.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 
+// Simulation and compute configuration.
+extern const double kGravitationalConstant = 6.6743e-11;
+const glm::vec3 kInitialCameraPosition(0.0f, 1000.0f, 5000.0f);
+extern const float kSpeedOfLight = 299792458.0f; // đổi từ float qua double
+float initMass = 5.0f * std::pow(10.0f, 20.0f) / 5.0f; // đổi từ float qua double
+int numRandomObjects = 200;
+float gridSize = 30000.0f;
+int gridDivisions = 200;
+
+// Must match layout(local_size_x = 16, local_size_y = 16) in grid.comp.
+extern const GLuint kGridLocalSizeX = 16;
+extern const GLuint kGridLocalSizeY = 16;
+
+// Mutable simulation and camera state.
+bool running = true;
+bool pause = false;
+glm::vec3 cameraPos = kInitialCameraPosition;
+glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+glm::vec3 cameraUp = glm::vec3(0.0f, 0.0f, 0.0f);
+float lastX = 400.0f;
+float lastY = 300.0f;
+float yaw = -90.0f;
+float pitch = 0.0f;
+float deltaTime = 0.0f;
+float lastFrame = 0.0f;
+
+// OpenGL resources and simulation objects shared by the render loop and callbacks.
+std::vector<Object> objs = {};
+GLuint gridVAO = 0;
+GLuint gridEBO = 0;
+GpuMemoryManager gpuMemoryManager;
+size_t gridNodeCount = 0;
+size_t gridIndexCount = 0;
+size_t objectStateCapacity = 0;
+
+// Mass aggregation
+float CEll_SIZE = gridSize / static_cast<float>(gridDivisions);
+float worldMin = -gridSize / 2.0f;
+float worldMax = gridSize / 2.0f;
+GLuint objectCellID = 0;
+
+// numerical error
+double dt = 1.0 / 96.0;
+
 void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
-                   double dt)
+                   double stepDt)
 {
-    std::ofstream file(filename);
+    std::filesystem::path outPath(filename);
+    if (outPath.has_parent_path())
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(outPath.parent_path(), ec);
+    }
+
+    std::ofstream file(outPath);
 
     if (!file.is_open())
     {
@@ -25,7 +79,7 @@ void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3
 
     for (size_t step = 0; step < positions.size(); ++step)
     {
-        double simulationTime = static_cast<double>(step) * dt;
+        double simulationTime = static_cast<double>(step) * stepDt;
 
         for (size_t objectId = 0; objectId < positions[step].size(); ++objectId)
         {
@@ -46,6 +100,75 @@ void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3
     }
 }
 
+void CaptureGpuTrajectorySampleV2(std::vector<TrajectorySampleV2> &samples,
+                                  std::uint64_t sceneGeneration, std::uint64_t simulationStep,
+                                  double nominalTimeSeconds)
+{
+    if (!gpuMemoryManager.Contains(BufferRole::CurrentState) ||
+        !gpuMemoryManager.Contains(BufferRole::ObjectControl))
+    {
+        throw std::runtime_error(
+            "CurrentState/ObjectControl buffers are unavailable for trajectory v2 capture");
+    }
+
+    gpuMemoryManager.WaitForGpuCompletion();
+    const auto *gpuState =
+        gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    const auto *gpuControl =
+        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    if (gpuState == nullptr || gpuControl == nullptr)
+    {
+        throw std::runtime_error("Persistent mappings are unavailable for trajectory v2 capture");
+    }
+
+    const size_t gpuObjectCount = gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount();
+    TrajectorySampleV2 sample;
+    sample.sceneGeneration = sceneGeneration;
+    sample.simulationStep = simulationStep;
+    sample.nominalTimeSeconds = nominalTimeSeconds;
+    sample.entries.reserve(gpuObjectCount);
+
+    for (size_t index = 0; index < gpuObjectCount; ++index)
+    {
+        TrajectoryRecordEntryV2 rec;
+        rec.logicalObjectId = gpuControl[index].id;
+        rec.position = glm::vec3(gpuState[index].position);
+        sample.entries.push_back(rec);
+    }
+    samples.push_back(std::move(sample));
+}
+
+bool SavePositionsV2(const std::string &filename, const std::vector<TrajectorySampleV2> &samples)
+{
+    std::filesystem::path outPath(filename);
+    if (outPath.has_parent_path())
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(outPath.parent_path(), ec);
+    }
+
+    std::ofstream file(outPath);
+    if (!file.is_open())
+    {
+        return false;
+    }
+
+    file << "# schema_version=2\n";
+    file << "scene_generation,step,nominal_time_s,logical_object_id,x,y,z\n";
+    file << std::setprecision(10);
+
+    for (const auto &sample : samples)
+    {
+        for (const auto &entry : sample.entries)
+        {
+            file << sample.sceneGeneration << ',' << sample.simulationStep << ','
+                 << sample.nominalTimeSeconds << ',' << entry.logicalObjectId << ','
+                 << entry.position.x << ',' << entry.position.y << ',' << entry.position.z << '\n';
+        }
+    }
+    return file.good();
+}
+
 struct ObjectMesh
 {
     GLuint objectVAO = 0;
@@ -54,6 +177,10 @@ struct ObjectMesh
 };
 
 ObjectMesh objectMesh;
+
+GLuint GetUnitSphereVao() { return objectMesh.objectVAO; }
+GLuint GetUnitSphereVbo() { return objectMesh.objectVBO; }
+GLsizei GetUnitSphereVertexCount() { return objectMesh.vertexCount; }
 
 // Tolerances for float comparison: absolute for values near zero, relative for large magnitudes
 // (e.g. mass ~1e22) where a fixed absolute epsilon would be meaningless.
@@ -91,10 +218,11 @@ std::uint32_t AllocateObjectId()
 
 std::string LoadShaderSource(const std::string &filePath)
 {
-    std::ifstream shaderFile(filePath);
+    const std::filesystem::path resolved = grav_render::ResolveAssetPath(filePath);
+    std::ifstream shaderFile(resolved, std::ios::in | std::ios::binary);
     if (!shaderFile)
     {
-        throw std::runtime_error("Unable to open shader file: " + filePath);
+        throw std::runtime_error("Unable to open shader file: " + resolved.string());
     }
     return std::string(std::istreambuf_iterator<char>(shaderFile),
                        std::istreambuf_iterator<char>());
@@ -106,6 +234,7 @@ void CreateShaderProgram(ShaderPrograms &shaderPrograms)
     shaderPrograms.objectRendering =
         CreateGraphicsProgram("shaders/objects.vert", "shaders/objects.frag");
     shaderPrograms.gridCompute = CreateComputeProgram("shaders/grid.comp");
+    shaderPrograms.gridSourceCompute = CreateComputeProgram("shaders/grid_sources.comp");
     shaderPrograms.nbodyCompute = CreateComputeProgram("shaders/nbody.comp");
     shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
 }
@@ -136,16 +265,33 @@ void InitializeComputeUniformLocations(const ShaderPrograms &programs,
     locations.integratePaused =
         getRequiredLocation(programs.integrateCompute, "integrateCompute", "u_paused");
 
-    locations.gridObjectCount =
-        getRequiredLocation(programs.gridCompute, "gridCompute", "u_objectCount");
-    locations.gridWidth = getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridWidth");
-    locations.gridHeight =
-        getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridHeight");
+    if (programs.gridSourceCompute != 0)
+    {
+        locations.gridSourceObjectCount =
+            getRequiredLocation(programs.gridSourceCompute, "gridSourceCompute", "u_objectCount");
+    }
+
+    if (programs.gridCompute != 0)
+    {
+        locations.gridSourceCount =
+            getRequiredLocation(programs.gridCompute, "gridCompute", "u_sourceCount");
+        locations.gridWidth =
+            getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridWidth");
+        locations.gridHeight =
+            getRequiredLocation(programs.gridCompute, "gridCompute", "u_gridHeight");
+        locations.gridMetersPerWorldUnit =
+            getRequiredLocation(programs.gridCompute, "gridCompute", "u_metersPerWorldUnit");
+        locations.gridDeformationAmplitudeWorld = getRequiredLocation(
+            programs.gridCompute, "gridCompute", "u_deformationAmplitudeWorld");
+        locations.gridClampDelta =
+            getRequiredLocation(programs.gridCompute, "gridCompute", "u_clampDelta");
+    }
 }
 
-glm::mat4 CreateScenePerspectiveProjection()
+glm::mat4 CreateScenePerspectiveProjection(float aspect)
 {
-    return glm::perspective(glm::radians(45.0f), 1920.0f / 1080.0f, 0.1f, 750000.0f);
+    const float safeAspect = aspect > 0.01f ? aspect : (1920.0f / 1080.0f);
+    return glm::perspective(glm::radians(45.0f), safeAspect, 0.1f, 750000.0f);
 }
 
 void InitializeGridRenderingUniforms(GLuint gridProgram, ShaderUniformLocations &uniformLocations)
@@ -220,23 +366,24 @@ void PrintComputeLimits()
               << std::endl;
 }
 
-GLFWwindow *StartGLU()
+GLFWwindow *StartGLU(int width, int height, const char *title, bool visible)
 {
     // Initialize GLFW and create a window with an OpenGL context.
     if (!glfwInit())
     {
-        std::cout << "Failed to initialize GLFW." << std::endl;
+        std::cerr << "Failed to initialize GLFW." << std::endl;
         return nullptr;
     }
     // Request OpenGL 4.4 core for immutable buffer storage and persistent mapping.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
     // Create a window with the specified dimensions and title.
-    GLFWwindow *window = glfwCreateWindow(1920, 1080, "GRAVITY SIMULATION - 3D GRID", NULL, NULL);
+    GLFWwindow *window = glfwCreateWindow(width, height, title, nullptr, nullptr);
     if (!window)
     {
-        std::cerr << "Failed to create GLFW window." << std::endl;
+        std::cerr << "Failed to create GLFW window (OpenGL 4.4 Core required)." << std::endl;
         glfwTerminate();
         return nullptr;
     }
@@ -246,6 +393,7 @@ GLFWwindow *StartGLU()
     if (glewInit() != GLEW_OK)
     {
         std::cerr << "Failed to initialize GLEW." << std::endl;
+        glfwDestroyWindow(window);
         glfwTerminate();
         return nullptr;
     }
@@ -256,12 +404,27 @@ GLFWwindow *StartGLU()
         glfwTerminate();
         return nullptr;
     }
+
+    GLint maxStorageBufferBindings = 0;
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxStorageBufferBindings);
+    if (maxStorageBufferBindings <= static_cast<GLint>(BindingFor(BufferRole::ObjectCollision)))
+    {
+        std::cerr << "OpenGL implementation does not provide at least 16 SSBO binding points."
+                  << std::endl;
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return nullptr;
+    }
+
     std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
     // Print compute limits for debugging purposes.
     PrintComputeLimits();
     // Enable depth testing and set the viewport dimensions.
+    int fbWidth = width;
+    int fbHeight = height;
+    glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
     glEnable(GL_DEPTH_TEST);
-    glViewport(0, 0, 1920, 1080);
+    glViewport(0, 0, std::max(fbWidth, 1), std::max(fbHeight, 1));
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     return window;
@@ -277,13 +440,17 @@ GLuint CreateGraphicsProgram(const std::string &vertexFilePath, const std::strin
     glShaderSource(vertexShader, 1, &vertexSourceData, nullptr);
     glCompileShader(vertexShader);
 
-    GLint success;
+    GLint success = GL_FALSE;
     glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
     if (!success)
     {
-        char infoLog[512];
-        glGetShaderInfoLog(vertexShader, 512, nullptr, infoLog);
-        std::cerr << "Vertex shader compilation failed: " << infoLog << std::endl;
+        GLint infoLogLength = 0;
+        glGetShaderiv(vertexShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+        std::string infoLog(static_cast<size_t>(std::max(infoLogLength, 1)), '\0');
+        glGetShaderInfoLog(vertexShader, infoLogLength, nullptr, infoLog.data());
+        glDeleteShader(vertexShader);
+        throw std::runtime_error("Vertex shader compilation failed (" + vertexFilePath +
+                                 "): " + infoLog);
     }
 
     GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
@@ -293,9 +460,14 @@ GLuint CreateGraphicsProgram(const std::string &vertexFilePath, const std::strin
     glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
     if (!success)
     {
-        char infoLog[512];
-        glGetShaderInfoLog(fragmentShader, 512, nullptr, infoLog);
-        std::cerr << "Fragment shader compilation failed: " << infoLog << std::endl;
+        GLint infoLogLength = 0;
+        glGetShaderiv(fragmentShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+        std::string infoLog(static_cast<size_t>(std::max(infoLogLength, 1)), '\0');
+        glGetShaderInfoLog(fragmentShader, infoLogLength, nullptr, infoLog.data());
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        throw std::runtime_error("Fragment shader compilation failed (" + fragmentFilePath +
+                                 "): " + infoLog);
     }
 
     GLuint renderingShaderProgram = glCreateProgram();
@@ -303,16 +475,20 @@ GLuint CreateGraphicsProgram(const std::string &vertexFilePath, const std::strin
     glAttachShader(renderingShaderProgram, fragmentShader);
     glLinkProgram(renderingShaderProgram);
 
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
     glGetProgramiv(renderingShaderProgram, GL_LINK_STATUS, &success);
     if (!success)
     {
-        char infoLog[512];
-        glGetProgramInfoLog(renderingShaderProgram, 512, nullptr, infoLog);
-        std::cerr << "Shader program linking failed: " << infoLog << std::endl;
+        GLint infoLogLength = 0;
+        glGetProgramiv(renderingShaderProgram, GL_INFO_LOG_LENGTH, &infoLogLength);
+        std::string infoLog(static_cast<size_t>(std::max(infoLogLength, 1)), '\0');
+        glGetProgramInfoLog(renderingShaderProgram, infoLogLength, nullptr, infoLog.data());
+        glDeleteProgram(renderingShaderProgram);
+        throw std::runtime_error("Shader program linking failed (" + vertexFilePath + " + " +
+                                 fragmentFilePath + "): " + infoLog);
     }
-
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
 
     return renderingShaderProgram;
 }
@@ -334,7 +510,8 @@ GLuint CreateComputeProgram(const std::string &filePath)
         std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
         glGetShaderInfoLog(computeShader, infoLogLength, nullptr, infoLog.data());
         glDeleteShader(computeShader);
-        throw std::runtime_error("Compute shader compilation failed: " + infoLog);
+        throw std::runtime_error("Compute shader compilation failed (" + filePath +
+                                 "): " + infoLog);
     }
 
     GLuint computeShaderProgram = glCreateProgram();
@@ -350,7 +527,7 @@ GLuint CreateComputeProgram(const std::string &filePath)
         glGetProgramInfoLog(computeShaderProgram, infoLogLength, nullptr, infoLog.data());
         glDeleteShader(computeShader);
         glDeleteProgram(computeShaderProgram);
-        throw std::runtime_error("Compute program linking failed: " + infoLog);
+        throw std::runtime_error("Compute program linking failed (" + filePath + "): " + infoLog);
     }
 
     glDeleteShader(computeShader);
@@ -365,16 +542,18 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &VBO, const float *vertices, size_t v
 
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertexCount * sizeof(float), vertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertexCount * sizeof(float)), vertices,
+                 GL_STATIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
     glEnableVertexAttribArray(0);
 
     if (EBO != nullptr)
     {
         glGenBuffers(1, EBO);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, *EBO);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int), indices,
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(indexCount * sizeof(unsigned int)), indices,
                      GL_STATIC_DRAW);
     }
 
@@ -675,13 +854,14 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
     glEnableVertexAttribArray(0);
     // Bind the EBO and upload the index data
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned int),
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(gridIndices.size() * sizeof(unsigned int)),
                  gridIndices.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
+void InitializeObjectComputeBuffers(size_t initialObjectCount)
 {
     GLint maxStorageBufferBindings = 0;
     glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxStorageBufferBindings);
@@ -690,7 +870,8 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
         throw std::runtime_error("OpenGL does not provide SSBO binding 15 for ObjectCollision");
     }
 
-    objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
+    objectStateCapacity = 0;
+    objectStateCapacity = CalculateObjectStateBufferCapacity(initialObjectCount);
     if (objectStateCapacity == 0)
     {
         objectStateCapacity = 256;
@@ -728,14 +909,73 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
                              GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectCollision),
                              objectStateCapacity});
-    gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::vec4), gridVertices.size()});
+}
+
+void BindAllObjectComputeBuffers()
+{
+    for (BufferRole role : kGravityObjectBufferRoles)
+    {
+        if (gpuMemoryManager.Contains(role))
+        {
+            gpuMemoryManager.Bind(role);
+        }
+    }
+}
+
+void RetireInitializingObjects()
+{
+    while (!objs.empty() && objs.back().initializing)
+    {
+        objs.pop_back();
+    }
+}
+
+void ReleaseObjectComputeBuffers(bool alreadyQuiescent)
+{
+    RetireInitializingObjects();
+    gpuMemoryManager.DestroyRoles(kGravityObjectBufferRoles.data(),
+                                  kGravityObjectBufferRoles.size(), alreadyQuiescent);
+    objectStateCapacity = 0;
+    std::vector<Object>().swap(objs);
+}
+
+void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
+{
+    InitializeObjectComputeBuffers(objs.size());
+
+    if (!gpuMemoryManager.Contains(BufferRole::BaseGrid))
+    {
+        gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
+                                 GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                                 sizeof(glm::vec4), gridVertices.size()});
+    }
+    else
+    {
+        gpuMemoryManager.Resize(BufferRole::BaseGrid, gridVertices.size());
+    }
     gpuMemoryManager.Upload(BufferRole::BaseGrid, gridVertices.data(),
                             gridVertices.size() * sizeof(glm::vec4), gridVertices.size());
-    gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::vec4), gridVertices.size()});
+
+    if (!gpuMemoryManager.Contains(BufferRole::DeformedGrid))
+    {
+        gpuMemoryManager.Create({BufferRole::DeformedGrid, GL_SHADER_STORAGE_BUFFER,
+                                 GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                                 sizeof(glm::vec4), gridVertices.size()});
+    }
+    else
+    {
+        gpuMemoryManager.Resize(BufferRole::DeformedGrid, gridVertices.size());
+    }
+
+    if (!gpuMemoryManager.Contains(BufferRole::GridSources))
+    {
+        gpuMemoryManager.Create({BufferRole::GridSources, GL_SHADER_STORAGE_BUFFER,
+                                 GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                                 sizeof(grav_render::GridSource),
+                                 std::max<std::size_t>(objectStateCapacity, 16)},
+                                false);
+    }
+    BindAllObjectComputeBuffers();
 }
 
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
@@ -787,7 +1027,10 @@ void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &
 void RunObjectStateSync(GLFWwindow *window, size_t &objectCount)
 {
     // 1. Update CPU-side properties of the object being created (mass/rs/radius).
-    UpdateInitializingObject(window);
+    if (window != nullptr)
+    {
+        UpdateInitializingObject(window);
+    }
 
     // 2. Resize/materialize GPU object buffers when the object count changes.
     const size_t currentObjectCount = objs.size();
@@ -812,6 +1055,10 @@ void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProg
     {
         return;
     }
+
+    // Rebind all 8 object SSBO roles explicitly because pass-scoped binding 1 is shared with
+    // GridSources during grid materialization and grid deformation passes.
+    BindAllObjectComputeBuffers();
 
     // Ensure that any CPU writes to persistently mapped buffers are visible to the GPU before running
     glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
@@ -852,15 +1099,67 @@ void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions)
     }
 }
 
-void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                    size_t objectCount)
+void RunGridSourceMaterialization(GLuint gridSourceShaderProgram,
+                                  const ComputeUniformLocations &locations, size_t objectCount)
 {
+    if (!gpuMemoryManager.Contains(BufferRole::GridSources))
+    {
+        gpuMemoryManager.Create({BufferRole::GridSources, GL_SHADER_STORAGE_BUFFER,
+                                 GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                                 sizeof(grav_render::GridSource),
+                                 std::max<std::size_t>(objectCount, 16)},
+                                false);
+    }
+    else if (gpuMemoryManager.Get(BufferRole::GridSources).Capacity() < objectCount)
+    {
+        gpuMemoryManager.Resize(BufferRole::GridSources,
+                                CalculateObjectStateBufferCapacity(objectCount), false);
+    }
+    gpuMemoryManager.Get(BufferRole::GridSources).SetLogicalCount(objectCount);
+
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    gpuMemoryManager.Bind(BufferRole::CurrentState, 0);
+    gpuMemoryManager.Bind(BufferRole::ObjectDerived, 12);
+    gpuMemoryManager.Bind(BufferRole::GridSources, 1);
+
+    constexpr GLuint localSizeX = 64;
+    const GLuint groupCountX = static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+    glUseProgram(gridSourceShaderProgram);
+    glUniform1ui(locations.gridSourceObjectCount, static_cast<GLuint>(objectCount));
+    glDispatchCompute(groupCountX, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                    size_t sourceCount, float metersPerWorldUnit, float deformationAmplitudeWorld,
+                    float clampDelta)
+{
+    if (gpuMemoryManager.Contains(BufferRole::GridSources))
+    {
+        gpuMemoryManager.Bind(BufferRole::GridSources, 1);
+    }
+    if (gpuMemoryManager.Contains(BufferRole::BaseGrid))
+    {
+        gpuMemoryManager.Bind(BufferRole::BaseGrid, 4);
+    }
+    if (gpuMemoryManager.Contains(BufferRole::DeformedGrid))
+    {
+        gpuMemoryManager.Bind(BufferRole::DeformedGrid, 5);
+    }
+
     glUseProgram(computeShaderProgram);
-    glUniform1ui(locations.gridObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1ui(locations.gridSourceCount, static_cast<GLuint>(sourceCount));
     const GLuint gridWidth = static_cast<GLuint>(gridDivisions + 1);
     const GLuint gridHeight = static_cast<GLuint>(gridDivisions + 1);
     glUniform1ui(locations.gridWidth, gridWidth);
     glUniform1ui(locations.gridHeight, gridHeight);
+    glUniform1f(locations.gridMetersPerWorldUnit, metersPerWorldUnit);
+    glUniform1f(locations.gridDeformationAmplitudeWorld, deformationAmplitudeWorld);
+    glUniform1f(locations.gridClampDelta, clampDelta);
     // Round up work group counts
     const GLuint groupCountX = (gridWidth + kGridLocalSizeX - 1) / kGridLocalSizeX;
     const GLuint groupCountY = (gridHeight + kGridLocalSizeY - 1) / kGridLocalSizeY;
@@ -875,16 +1174,29 @@ void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &
 void Cleanup(const ShaderPrograms &shaderPrograms)
 {
     DestroyObjectRenderingResources();
-    glDeleteVertexArrays(1, &gridVAO);
-    glDeleteBuffers(1, &gridEBO);
+    if (gridVAO != 0)
+    {
+        glDeleteVertexArrays(1, &gridVAO);
+    }
+    if (gridEBO != 0)
+    {
+        glDeleteBuffers(1, &gridEBO);
+    }
     gpuMemoryManager.Shutdown();
-    glDeleteProgram(shaderPrograms.gridRendering);
-    glDeleteProgram(shaderPrograms.gridCompute);
-    glDeleteProgram(shaderPrograms.objectRendering);
-    glDeleteProgram(shaderPrograms.nbodyCompute);
-    glDeleteProgram(shaderPrograms.integrateCompute);
+    if (shaderPrograms.gridRendering != 0)
+        glDeleteProgram(shaderPrograms.gridRendering);
+    if (shaderPrograms.gridCompute != 0)
+        glDeleteProgram(shaderPrograms.gridCompute);
+    if (shaderPrograms.gridSourceCompute != 0)
+        glDeleteProgram(shaderPrograms.gridSourceCompute);
+    if (shaderPrograms.objectRendering != 0)
+        glDeleteProgram(shaderPrograms.objectRendering);
+    if (shaderPrograms.nbodyCompute != 0)
+        glDeleteProgram(shaderPrograms.nbodyCompute);
+    if (shaderPrograms.integrateCompute != 0)
+        glDeleteProgram(shaderPrograms.integrateCompute);
 
-    objs.clear();
+    std::vector<Object>().swap(objs);
     gridVAO = 0;
     gridEBO = 0;
     objectStateCapacity = 0;
@@ -898,20 +1210,22 @@ void BeginFrame() { glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
 
 void UpdateInitializingObject(GLFWwindow *window)
 {
-    if (objs.empty() || !objs.back().initializing)
+    if (window == nullptr || objs.empty() || !objs.back().initializing)
         return;
 
     Object &initializingObject = objs.back();
     if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     {
-        initializingObject.mass *= 1.0 + 1.0 * deltaTime;
-        initializingObject.rs = (2 * kGravitationalConstant * initializingObject.mass) /
-                                (kSpeedOfLight * kSpeedOfLight);
+        initializingObject.mass *= 1.0f + 1.0f * deltaTime;
+        initializingObject.rs = static_cast<float>(
+            (2.0 * kGravitationalConstant * initializingObject.mass) /
+            (static_cast<double>(kSpeedOfLight) * kSpeedOfLight));
     }
 
     initializingObject.radius =
-        pow((3 * initializingObject.mass / initializingObject.density) / (4 * 3.14159265359f),
-            1.0f / 3.0f) /
+        std::pow((3.0f * initializingObject.mass / initializingObject.density) /
+                     (4.0f * 3.14159265359f),
+                 1.0f / 3.0f) /
         100000.0f;
 }
 
@@ -946,15 +1260,17 @@ void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
         cameraPos -= cameraSpeed * cameraUp;
 
-    if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS)
-        pause = true;
-    if (glfwGetKey(window, GLFW_KEY_K) == GLFW_RELEASE)
-        pause = false;
-
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+    if (key == GLFW_KEY_K)
     {
-        glfwTerminate();
-        glfwWindowShouldClose(window);
+        if (action == GLFW_PRESS)
+            pause = true;
+        else if (action == GLFW_RELEASE)
+            pause = false;
+    }
+
+    if (key == GLFW_KEY_Q && action == GLFW_PRESS)
+    {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
         running = false;
     }
 
@@ -966,11 +1282,11 @@ void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods
         {
             if (!shiftPressed)
             {
-                lastObj.position[1] += 0.5;
+                lastObj.position[1] += 0.5f;
             }
             else
             {
-                lastObj.position[2] += 0.5;
+                lastObj.position[2] += 0.5f;
             }
             positionChanged = true;
         }
@@ -978,22 +1294,22 @@ void KeyCallback(GLFWwindow *window, int key, int scanCode, int action, int mods
         {
             if (!shiftPressed)
             {
-                lastObj.position[1] -= 0.5;
+                lastObj.position[1] -= 0.5f;
             }
             else
             {
-                lastObj.position[2] -= 0.5;
+                lastObj.position[2] -= 0.5f;
             }
             positionChanged = true;
         }
         if (key == GLFW_KEY_RIGHT && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
-            lastObj.position[0] += 0.5;
+            lastObj.position[0] += 0.5f;
             positionChanged = true;
         }
         if (key == GLFW_KEY_LEFT && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
-            lastObj.position[0] -= 0.5;
+            lastObj.position[0] -= 0.5f;
             positionChanged = true;
         }
         if (positionChanged)
@@ -1015,10 +1331,10 @@ void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
     // |
     // |
     // +y
-    float xOffset = xPosition - lastX;
-    float yOffset = lastY - yPosition;
-    lastX = xPosition;
-    lastY = yPosition;
+    float xOffset = static_cast<float>(xPosition) - lastX;
+    float yOffset = lastY - static_cast<float>(yPosition);
+    lastX = static_cast<float>(xPosition);
+    lastY = static_cast<float>(yPosition);
     // Adjust the sensitivity of the mouse movement for smoother camera rotation.
     float sensitivity = 0.1f;
     xOffset *= sensitivity;
@@ -1033,9 +1349,9 @@ void MouseCallback(GLFWwindow *window, double xPosition, double yPosition)
         pitch = -89.0f;
 
     glm::vec3 front;
-    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-    front.y = sin(glm::radians(pitch));
-    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+    front.x = std::cos(glm::radians(yaw)) * std::cos(glm::radians(pitch));
+    front.y = std::sin(glm::radians(pitch));
+    front.z = std::sin(glm::radians(yaw)) * std::cos(glm::radians(pitch));
     cameraFront = glm::normalize(front);
 }
 
@@ -1056,7 +1372,7 @@ void MouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
     {
         if (action == GLFW_PRESS)
         {
-            objs.emplace_back(glm::vec3(0.0, 0.0, 0.0), glm::vec3(0.0f, 0.0f, 0.0f), initMass);
+            objs.emplace_back(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), initMass);
             objs.back().initializing = true;
         }
         if (action == GLFW_RELEASE && !objs.empty())
@@ -1081,22 +1397,22 @@ void ScrollCallback(GLFWwindow *window, double xOffset, double yOffset)
 
 glm::vec3 SphericalToCartesian(float radius, float theta, float phi)
 {
-    float x = radius * sin(theta) * cos(phi);
-    float y = radius * cos(theta);
-    float z = radius * sin(theta) * sin(phi);
+    float x = radius * std::sin(theta) * std::cos(phi);
+    float y = radius * std::cos(theta);
+    float z = radius * std::sin(theta) * std::sin(phi);
     return glm::vec3(x, y, z);
 }
 
-void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAO, size_t indexCount,
+void DrawGrid(GLuint renderingShaderProgram, GLuint gridVAOHandle, size_t indexCount,
               const ShaderUniformLocations &uniformLocations)
 {
     glUseProgram(renderingShaderProgram);
     glUniform4f(uniformLocations.gridObjectColor, 1.0f, 1.0f, 1.0f, 0.25f);
     glm::mat4 model = glm::mat4(1.0f);
     glUniformMatrix4fv(uniformLocations.gridModel, 1, GL_FALSE, glm::value_ptr(model));
-    glBindVertexArray(gridVAO);
+    glBindVertexArray(gridVAOHandle);
     // glPointSize(5.0f);
-    glDrawElements(GL_LINES, indexCount, GL_UNSIGNED_INT, 0);
+    glDrawElements(GL_LINES, static_cast<GLsizei>(indexCount), GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);
 }
 
@@ -1154,18 +1470,18 @@ std::vector<float> CreateGridVertices(float size, int divisions)
 {
     std::vector<float> vertices;
     int numNodesPerSide = divisions + 1;
-    vertices.reserve(numNodesPerSide * numNodesPerSide * 3);
+    vertices.reserve(static_cast<size_t>(numNodesPerSide) * numNodesPerSide * 3);
 
-    float step = size / divisions;
+    float step = size / static_cast<float>(divisions);
     float halfSize = size / 2.0f;
     float baseY = -800.0f;
 
     for (int zStep = 0; zStep <= divisions; ++zStep)
     {
-        float z = -halfSize + zStep * step;
+        float z = -halfSize + static_cast<float>(zStep) * step;
         for (int xStep = 0; xStep <= divisions; ++xStep)
         {
-            float x = -halfSize + xStep * step;
+            float x = -halfSize + static_cast<float>(xStep) * step;
             vertices.push_back(x);
             vertices.push_back(baseY);
             vertices.push_back(z);
@@ -1178,14 +1494,15 @@ std::vector<unsigned int> CreateGridIndices(int divisions)
 {
     std::vector<unsigned int> indices;
     int rowSize = divisions + 1;
-    size_t totalIndices = 4 * divisions * (divisions + 1);
+    size_t totalIndices =
+        static_cast<size_t>(4) * static_cast<size_t>(divisions) * static_cast<size_t>(divisions + 1);
     indices.reserve(totalIndices);
 
     for (int z = 0; z <= divisions; ++z)
     {
         for (int x = 0; x < divisions; ++x)
         {
-            int current = z * rowSize + x;
+            unsigned int current = static_cast<unsigned int>(z * rowSize + x);
             indices.push_back(current);
             indices.push_back(current + 1);
         }
@@ -1195,9 +1512,9 @@ std::vector<unsigned int> CreateGridIndices(int divisions)
     {
         for (int x = 0; x <= divisions; ++x)
         {
-            int current = z * rowSize + x;
+            unsigned int current = static_cast<unsigned int>(z * rowSize + x);
             indices.push_back(current);
-            indices.push_back(current + rowSize);
+            indices.push_back(current + static_cast<unsigned int>(rowSize));
         }
     }
 
@@ -1215,7 +1532,7 @@ std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, flo
     std::uniform_real_distribution<float> tiltDist(-0.15f, 0.15f);
 
     std::vector<Object> generated;
-    generated.reserve(count);
+    generated.reserve(static_cast<size_t>(std::max(count, 0)));
 
     for (int i = 0; i < count; ++i)
     {
@@ -1243,7 +1560,12 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
 {
     if (!objectFilePath.empty())
     {
-        std::ifstream objectFile(objectFilePath);
+        std::filesystem::path resolvedPath;
+        if (!grav_render::TryResolveAssetPath(objectFilePath, resolvedPath))
+        {
+            resolvedPath = std::filesystem::path(objectFilePath);
+        }
+        std::ifstream objectFile(resolvedPath);
         if (!objectFile)
         {
             throw std::runtime_error("Unable to open object file: " + objectFilePath);
@@ -1255,6 +1577,11 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
         while (std::getline(objectFile, line))
         {
             ++lineNumber;
+            // Trim trailing CR from Windows CRLF files
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            {
+                line.pop_back();
+            }
             if (line.empty() || line.front() == '#')
             {
                 continue;
@@ -1282,9 +1609,22 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
                 throw std::runtime_error("Invalid object data at line " +
                                          std::to_string(lineNumber) + " in " + objectFilePath);
             }
+            if (!std::isfinite(positionX) || !std::isfinite(positionY) ||
+                !std::isfinite(positionZ) || !std::isfinite(velocityX) ||
+                !std::isfinite(velocityY) || !std::isfinite(velocityZ) ||
+                !std::isfinite(mass) || mass <= 0.0f || !std::isfinite(density) ||
+                density <= 0.0f)
+            {
+                throw std::runtime_error("Non-finite or non-positive mass/density at line " +
+                                         std::to_string(lineNumber) + " in " + objectFilePath);
+            }
 
             loadedObjects.emplace_back(glm::vec3(positionX, positionY, positionZ),
                                        glm::vec3(velocityX, velocityY, velocityZ), mass, density);
+        }
+        if (loadedObjects.empty())
+        {
+            throw std::runtime_error("Object file contained zero valid objects: " + objectFilePath);
         }
         return loadedObjects;
     }
@@ -1298,27 +1638,24 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
     return defaultObjects;
 }
 
-// GLuint CreateObjectCellID(const std::vector<Object> &objects, GLuint &cellIDBuffer)
-// {
-//     std::vector<GLuint> cellIDs(objects.size());
-//     for (size_t i = 0; i < objects.size(); ++i)
-//     {
-//         const Object &obj = objects[i];
-//         glm::ivec3 cellIndex = glm::ivec3(
-//             static_cast<int>((obj.position.x + gridSize / 2.0f) / (gridSize / gridDivisions)),
-//             static_cast<int>((obj.position.y + gridSize / 2.0f) / (gridSize / gridDivisions)),
-//             static_cast<int>((obj.position.z + gridSize / 2.0f) / (gridSize / gridDivisions)));
-//         cellIDs[i] = static_cast<GLuint>(cellIndex.x + cellIndex.y * (gridDivisions + 1) +
-//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions +
-//                                           1));
-//     }
+std::vector<Object> CreateLegacyThreeBodyObjects()
+{
+    // Provenance: Initial conditions imported from src/legacy/gravity_sim.cpp:227-232.
+    // Note: Evaluated under the active engine's solver (GPU snapshot N-body or F6 CPU baseline),
+    // not claiming identical trajectories to the legacy GLOW prototype.
+    std::vector<Object> bodies;
+    bodies.reserve(3);
 
-//     glGenBuffers(1, &cellIDBuffer);
-//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, cellIDBuffer);
-//     glBufferData(GL_SHADER_STORAGE_BUFFER, cellIDs.size() * sizeof(GLuint), cellIDs.data(),
-//                  GL_STATIC_DRAW);
-//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-//     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, cellIDBuffer);
+    bodies.emplace_back(glm::vec3(-5000.0f, 650.0f, -350.0f), glm::vec3(0.0f, 0.0f, 1500.0f),
+                        5.97219e22f, 5515.0f);
+    bodies.back().color = glm::vec4(0.0f, 1.0f, 1.0f, 1.0f);
 
-//     return cellIDBuffer;
-// }
+    bodies.emplace_back(glm::vec3(5000.0f, 650.0f, -350.0f), glm::vec3(0.0f, 0.0f, -1500.0f),
+                        5.97219e22f, 5515.0f);
+    bodies.back().color = glm::vec4(0.0f, 1.0f, 1.0f, 1.0f);
+
+    bodies.emplace_back(glm::vec3(0.0f, 0.0f, -350.0f), glm::vec3(0.0f, 0.0f, 0.0f), 1.989e25f,
+                        5515.0f);
+    bodies.back().color = glm::vec4(1.0f, 0.929f, 0.176f, 1.0f);
+    return bodies;
+}

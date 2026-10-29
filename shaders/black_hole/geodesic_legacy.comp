@@ -1,0 +1,246 @@
+#version 440 core
+
+// Provenance: Adapted from quocthaile/black_hole:main (geodesic.comp @ dc263bb).
+// Solver ID: euler_spherical_legacy_v1 (Status: source_compatible_legacy).
+// Note: Original function was named rk4Step but performs a single Euler RHS evaluation per step.
+// Fixed std140 UBO layouts (no bool or unpadded float[16] scalar array hazards) and shared BH rs.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) writeonly uniform image2D outImage;
+
+layout(std140, binding = 1) uniform CameraBlock
+{
+    vec4 camPos_tanHalfFov;     // xyz: camera position (m), w: tan(fovY / 2)
+    vec4 camRight_aspect;       // xyz: camera right, w: aspect ratio
+    vec4 camUp_moving;          // xyz: camera up, w: moving flag (0 or 1)
+    vec4 camForward_maxSteps;   // xyz: camera forward, w: max integration steps
+    vec4 bhCenter_rs;           // xyz: black hole position (m), w: Schwarzschild radius rs (m)
+    vec4 stepParams;            // x: dLambda (m), y: escapeRadius (m), z: outWidth, w: outHeight
+} u_cam;
+
+layout(std140, binding = 2) uniform DiskBlock
+{
+    vec4 diskParams;            // x: inner radius (m), y: outer radius (m), z: enabled, w: thickness
+} u_disk;
+
+layout(std140, binding = 3) uniform ObjectsBlock
+{
+    ivec4 counts;               // x: numObjects (clamped to <= 16)
+    vec4 objPosRadius[16];      // xyz: position (m), w: radius (m)
+    vec4 objColor[16];          // rgba
+    vec4 objMassPad[16];        // x: mass (kg), yzw: reserved padding
+} u_objects;
+
+struct LegacyRay
+{
+    float x, y, z;
+    float r, theta, phi;
+    float dr, dtheta, dphi;
+    float E, L;
+};
+
+LegacyRay initLegacyRay(vec3 relPos, vec3 dir, float rs)
+{
+    LegacyRay ray;
+    ray.x = relPos.x;
+    ray.y = relPos.y;
+    ray.z = relPos.z;
+    ray.r = max(length(relPos), rs * 1.0001);
+    float cosTheta = clamp(relPos.z / ray.r, -0.999999, 0.999999);
+    ray.theta = acos(cosTheta);
+    ray.phi = atan(relPos.y, relPos.x);
+
+    float sinT = max(abs(sin(ray.theta)), 1e-5);
+    float cosT = cos(ray.theta);
+    float sinP = sin(ray.phi);
+    float cosP = cos(ray.phi);
+
+    float dx = dir.x, dy = dir.y, dz = dir.z;
+    ray.dr = sinT * cosP * dx + sinT * sinP * dy + cosT * dz;
+    ray.dtheta = (cosT * cosP * dx + cosT * sinP * dy - sinT * dz) / ray.r;
+    ray.dphi = (-sinP * dx + cosP * dy) / (ray.r * sinT);
+
+    ray.L = ray.r * ray.r * sinT * ray.dphi;
+    float f = 1.0 - rs / ray.r;
+    // Preserves legacy source initialization formula from geodesic.comp:58
+    float dt_dL = sqrt((ray.dr * ray.dr) / max(f, 1e-6) +
+                       ray.r * ray.r * (ray.dtheta * ray.dtheta + sinT * sinT * ray.dphi * ray.dphi));
+    ray.E = f * dt_dL;
+    return ray;
+}
+
+void legacyGeodesicRHS(LegacyRay ray, float rs, out vec3 d1, out vec3 d2)
+{
+    float r = ray.r;
+    float theta = ray.theta;
+    float dr = ray.dr;
+    float dtheta = ray.dtheta;
+    float dphi = ray.dphi;
+    float sinT = sin(theta);
+    float cosT = cos(theta);
+    float safeSinT = (abs(sinT) < 1e-5) ? (sinT < 0.0 ? -1e-5 : 1e-5) : sinT;
+    float f = max(1.0 - rs / r, 1e-6);
+    float dt_dL = ray.E / f;
+
+    d1 = vec3(dr, dtheta, dphi);
+    // Preserves legacy radial angular term r*(...) from geodesic.comp:92
+    d2.x = -(rs / (2.0 * r * r)) * f * dt_dL * dt_dL +
+           (rs / (2.0 * r * r * f)) * dr * dr +
+           r * (dtheta * dtheta + sinT * sinT * dphi * dphi);
+    d2.y = -2.0 * dr * dtheta / r + sinT * cosT * dphi * dphi;
+    d2.z = -2.0 * dr * dphi / r - 2.0 * (cosT / safeSinT) * dtheta * dphi;
+}
+
+void eulerStepLegacy(inout LegacyRay ray, float dL, float rs)
+{
+    vec3 k1a, k1b;
+    legacyGeodesicRHS(ray, rs, k1a, k1b);
+
+    ray.r += dL * k1a.x;
+    ray.theta += dL * k1a.y;
+    ray.phi += dL * k1a.z;
+    ray.dr += dL * k1b.x;
+    ray.dtheta += dL * k1b.y;
+    ray.dphi += dL * k1b.z;
+
+    float sinT = sin(ray.theta);
+    ray.x = ray.r * sinT * cos(ray.phi);
+    ray.y = ray.r * sinT * sin(ray.phi);
+    ray.z = ray.r * cos(ray.theta);
+}
+
+bool crossesEquatorialDisk(vec3 oldRelPos, vec3 newRelPos, float r1, float r2, out vec3 hitRelPos)
+{
+    if (oldRelPos.y * newRelPos.y < 0.0)
+    {
+        float denom = oldRelPos.y - newRelPos.y;
+        float t = (abs(denom) > 1e-12) ? clamp(oldRelPos.y / denom, 0.0, 1.0) : 0.5;
+        hitRelPos = mix(oldRelPos, newRelPos, t);
+        float r = length(vec2(hitRelPos.x, hitRelPos.z));
+        return (r >= r1 && r <= r2);
+    }
+    hitRelPos = newRelPos;
+    return false;
+}
+
+bool interceptSceneObject(vec3 worldPos, vec3 bhCenter, float rs, out vec4 hitCol, out vec3 hitCenter)
+{
+    int count = clamp(u_objects.counts.x, 0, 16);
+    for (int i = 0; i < count; ++i)
+    {
+        vec3 center = u_objects.objPosRadius[i].xyz;
+        float radius = u_objects.objPosRadius[i].w;
+        // Skip central black hole placeholder entry so horizon check handles it cleanly
+        if (distance(center, bhCenter) < rs * 0.25 && radius <= rs * 1.05)
+        {
+            continue;
+        }
+        if (distance(worldPos, center) <= radius)
+        {
+            hitCol = u_objects.objColor[i];
+            hitCenter = center;
+            return true;
+        }
+    }
+    hitCol = vec4(0.0);
+    hitCenter = vec3(0.0);
+    return false;
+}
+
+void main()
+{
+    ivec2 imgSize = imageSize(outImage);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y)
+    {
+        return;
+    }
+
+    float aspect = u_cam.camRight_aspect.w;
+    float tanHalfFov = u_cam.camPos_tanHalfFov.w;
+    float ndcX = 2.0 * ((float(pix.x) + 0.5) / float(imgSize.x)) - 1.0;
+    float ndcY = 2.0 * ((float(pix.y) + 0.5) / float(imgSize.y)) - 1.0;
+
+    vec3 dir = normalize(ndcX * aspect * tanHalfFov * u_cam.camRight_aspect.xyz +
+                         ndcY * tanHalfFov * u_cam.camUp_moving.xyz +
+                         u_cam.camForward_maxSteps.xyz);
+
+    vec3 bhCenter = u_cam.bhCenter_rs.xyz;
+    float rs = u_cam.bhCenter_rs.w;
+    float dLambda = u_cam.stepParams.x;
+    float escapeR = u_cam.stepParams.y;
+    int maxSteps = int(u_cam.camForward_maxSteps.w);
+
+    vec3 startRel = u_cam.camPos_tanHalfFov.xyz - bhCenter;
+    LegacyRay ray = initLegacyRay(startRel, dir, rs);
+    vec3 prevRel = vec3(ray.x, ray.y, ray.z);
+
+    bool hitBlackHole = false;
+    bool hitDisk = false;
+    bool hitObject = false;
+    vec3 diskHitRel = vec3(0.0);
+    vec4 hitObjColor = vec4(0.0);
+    vec3 hitObjCenter = vec3(0.0);
+
+    bool diskEnabled = (u_disk.diskParams.z > 0.5);
+    float diskR1 = u_disk.diskParams.x;
+    float diskR2 = u_disk.diskParams.y;
+
+    for (int i = 0; i < maxSteps; ++i)
+    {
+        if (ray.r <= rs)
+        {
+            hitBlackHole = true;
+            break;
+        }
+        eulerStepLegacy(ray, dLambda, rs);
+        vec3 newRel = vec3(ray.x, ray.y, ray.z);
+        if (ray.r <= rs)
+        {
+            hitBlackHole = true;
+            break;
+        }
+        if (diskEnabled && crossesEquatorialDisk(prevRel, newRel, diskR1, diskR2, diskHitRel))
+        {
+            hitDisk = true;
+            break;
+        }
+        vec3 worldPos = bhCenter + newRel;
+        if (interceptSceneObject(worldPos, bhCenter, rs, hitObjColor, hitObjCenter))
+        {
+            hitObject = true;
+            break;
+        }
+        prevRel = newRel;
+        if (ray.r > escapeR)
+        {
+            break;
+        }
+    }
+
+    vec4 color = vec4(0.02, 0.02, 0.05, 1.0);
+    if (hitDisk)
+    {
+        float rNorm = clamp(length(vec2(diskHitRel.x, diskHitRel.z)) / max(diskR2, 1.0), 0.0, 1.0);
+        vec3 diskColor = vec3(1.0, rNorm, 0.2);
+        color = vec4(diskColor * (1.15 - 0.5 * rNorm), 1.0);
+    }
+    else if (hitBlackHole)
+    {
+        color = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    else if (hitObject)
+    {
+        vec3 worldPos = bhCenter + vec3(ray.x, ray.y, ray.z);
+        vec3 N = normalize(worldPos - hitObjCenter);
+        vec3 V = normalize(u_cam.camPos_tanHalfFov.xyz - worldPos);
+        float ambient = 0.12;
+        float diff = max(dot(N, V), 0.0);
+        float intensity = ambient + (1.0 - ambient) * diff;
+        color = vec4(hitObjColor.rgb * intensity, 1.0);
+    }
+
+    imageStore(outImage, pix, color);
+}
+

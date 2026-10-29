@@ -1,0 +1,254 @@
+#version 440 core
+
+// Canonical Schwarzschild 3D Null-Geodesic Ray Tracer (4-stage RK4)
+// Solver ID: rk4_canonical_v1 (Status: numerical_validated).
+// Integrates dimensionless spatial Schwarzschild coordinates u = (x - x_BH) / rs:
+//   du/dh = v,   dv/dh = -1.5 * |u x v|^2 / |u|^5 * u
+// Singularity-free at poles (theta = 0, pi) and horizon (|u| = 1), exact photon sphere at |u| = 1.5,
+// and algebraically identical to equatorial Schwarzschild null geodesics (ddot(r) = (r - 1.5*rs)*dphi^2).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) writeonly uniform image2D outImage;
+
+layout(std140, binding = 1) uniform CameraBlock
+{
+    vec4 camPos_tanHalfFov;     // xyz: camera position (m), w: tan(fovY / 2)
+    vec4 camRight_aspect;       // xyz: camera right, w: aspect ratio
+    vec4 camUp_moving;          // xyz: camera up, w: moving flag (0 or 1)
+    vec4 camForward_maxSteps;   // xyz: camera forward, w: max integration steps
+    vec4 bhCenter_rs;           // xyz: black hole position (m), w: Schwarzschild radius rs (m)
+    vec4 stepParams;            // x: dLambda (m), y: escapeRadius (m), z: outWidth, w: outHeight
+} u_cam;
+
+layout(std140, binding = 2) uniform DiskBlock
+{
+    vec4 diskParams;            // x: inner radius (m), y: outer radius (m), z: enabled, w: thickness
+} u_disk;
+
+layout(std140, binding = 3) uniform ObjectsBlock
+{
+    ivec4 counts;               // x: numObjects (clamped to <= 16)
+    vec4 objPosRadius[16];      // xyz: position (m), w: radius (m)
+    vec4 objColor[16];          // rgba
+    vec4 objMassPad[16];        // x: mass (kg), yzw: reserved padding
+} u_objects;
+
+vec3 accelCanonical(vec3 uPos, vec3 uVel)
+{
+    float r2 = max(dot(uPos, uPos), 1e-8);
+    float r = sqrt(r2);
+    float r5 = r2 * r2 * r;
+    vec3 hVec = cross(uPos, uVel);
+    float h2 = dot(hVec, hVec);
+    return (-1.5 * h2 / r5) * uPos;
+}
+
+void rk4StepCanonical(inout vec3 uPos, inout vec3 uVel, float h)
+{
+    vec3 k1x = uVel;
+    vec3 k1v = accelCanonical(uPos, uVel);
+
+    vec3 p2 = uPos + 0.5 * h * k1x;
+    vec3 v2 = uVel + 0.5 * h * k1v;
+    vec3 k2x = v2;
+    vec3 k2v = accelCanonical(p2, v2);
+
+    vec3 p3 = uPos + 0.5 * h * k2x;
+    vec3 v3 = uVel + 0.5 * h * k2v;
+    vec3 k3x = v3;
+    vec3 k3v = accelCanonical(p3, v3);
+
+    vec3 p4 = uPos + h * k3x;
+    vec3 v4 = uVel + h * k3v;
+    vec3 k4x = v4;
+    vec3 k4v = accelCanonical(p4, v4);
+
+    uPos += (h / 6.0) * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
+    uVel += (h / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
+}
+
+bool segmentHitsSphere(vec3 p0, vec3 p1, vec3 center, float radius, out float hitT)
+{
+    vec3 d = p1 - p0;
+    vec3 oc = p0 - center;
+    float a = dot(d, d);
+    if (a < 1e-12)
+    {
+        hitT = 0.0;
+        return length(oc) <= radius;
+    }
+    float b = 2.0 * dot(oc, d);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0)
+    {
+        hitT = 1.0;
+        return false;
+    }
+    float s = sqrt(disc);
+    float t0 = (-b - s) / (2.0 * a);
+    float t1 = (-b + s) / (2.0 * a);
+    if (t0 >= 0.0 && t0 <= 1.0)
+    {
+        hitT = t0;
+        return true;
+    }
+    if (t1 >= 0.0 && t1 <= 1.0)
+    {
+        hitT = t1;
+        return true;
+    }
+    hitT = 1.0;
+    return false;
+}
+
+void main()
+{
+    ivec2 imgSize = imageSize(outImage);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y)
+    {
+        return;
+    }
+
+    float aspect = u_cam.camRight_aspect.w;
+    float tanHalfFov = u_cam.camPos_tanHalfFov.w;
+    float ndcX = 2.0 * ((float(pix.x) + 0.5) / float(imgSize.x)) - 1.0;
+    float ndcY = 2.0 * ((float(pix.y) + 0.5) / float(imgSize.y)) - 1.0;
+
+    vec3 dir = normalize(ndcX * aspect * tanHalfFov * u_cam.camRight_aspect.xyz +
+                         ndcY * tanHalfFov * u_cam.camUp_moving.xyz +
+                         u_cam.camForward_maxSteps.xyz);
+
+    vec3 bhCenter = u_cam.bhCenter_rs.xyz;
+    float rs = max(u_cam.bhCenter_rs.w, 1.0);
+    float invRs = 1.0 / rs;
+
+    // Dimensionless coordinates scaled by Schwarzschild radius rs
+    vec3 uPos = (u_cam.camPos_tanHalfFov.xyz - bhCenter) * invRs;
+    vec3 uVel = dir;
+    float hStep = u_cam.stepParams.x * invRs;
+    float uEscape = u_cam.stepParams.y * invRs;
+    int maxSteps = int(u_cam.camForward_maxSteps.w);
+
+    bool diskEnabled = (u_disk.diskParams.z > 0.5);
+    float uDiskR1 = u_disk.diskParams.x * invRs;
+    float uDiskR2 = u_disk.diskParams.y * invRs;
+    int objCount = clamp(u_objects.counts.x, 0, 16);
+
+    bool hitBlackHole = false;
+    bool hitDisk = false;
+    bool hitObject = false;
+    vec3 uDiskHit = vec3(0.0);
+    vec4 hitObjColor = vec4(0.0);
+    vec3 uHitObjCenter = vec3(0.0);
+    vec3 uHitObjPoint = vec3(0.0);
+
+    for (int i = 0; i < maxSteps; ++i)
+    {
+        float rBefore = length(uPos);
+        if (rBefore <= 1.0)
+        {
+            hitBlackHole = true;
+            break;
+        }
+
+        vec3 prevUPos = uPos;
+        rk4StepCanonical(uPos, uVel, hStep);
+        float rAfter = length(uPos);
+
+        // Event ordering along segment [prevUPos, uPos]
+        float bestT = 2.0;
+        int bestEvent = 0; // 1 = horizon, 2 = disk, 3 = object
+
+        float tHorizon = 1.0;
+        if (rAfter <= 1.0 || segmentHitsSphere(prevUPos, uPos, vec3(0.0), 1.0, tHorizon))
+        {
+            bestT = min(tHorizon, 1.0);
+            bestEvent = 1;
+        }
+
+        if (diskEnabled && (prevUPos.y * uPos.y <= 0.0) && (prevUPos.y != uPos.y))
+        {
+            float tDisk = clamp(prevUPos.y / (prevUPos.y - uPos.y), 0.0, 1.0);
+            vec3 crossPt = mix(prevUPos, uPos, tDisk);
+            float rDisk = length(vec2(crossPt.x, crossPt.z));
+            if (rDisk >= uDiskR1 && rDisk <= uDiskR2 && tDisk < bestT)
+            {
+                bestT = tDisk;
+                bestEvent = 2;
+                uDiskHit = crossPt;
+            }
+        }
+
+        for (int objIdx = 0; objIdx < objCount; ++objIdx)
+        {
+            vec3 uCenter = (u_objects.objPosRadius[objIdx].xyz - bhCenter) * invRs;
+            float uRadius = u_objects.objPosRadius[objIdx].w * invRs;
+            if (length(uCenter) < 0.25 && uRadius <= 1.05)
+            {
+                continue;
+            }
+            float tObj = 1.0;
+            if (segmentHitsSphere(prevUPos, uPos, uCenter, uRadius, tObj) && tObj < bestT)
+            {
+                bestT = tObj;
+                bestEvent = 3;
+                hitObjColor = u_objects.objColor[objIdx];
+                uHitObjCenter = uCenter;
+                uHitObjPoint = mix(prevUPos, uPos, tObj);
+            }
+        }
+
+        if (bestEvent == 1)
+        {
+            hitBlackHole = true;
+            break;
+        }
+        if (bestEvent == 2)
+        {
+            hitDisk = true;
+            break;
+        }
+        if (bestEvent == 3)
+        {
+            hitObject = true;
+            break;
+        }
+
+        if (rAfter > uEscape && dot(uPos, uVel) > 0.0)
+        {
+            break;
+        }
+    }
+
+    vec4 color = vec4(0.02, 0.02, 0.05, 1.0);
+    if (hitDisk)
+    {
+        float rDisk = length(vec2(uDiskHit.x, uDiskHit.z));
+        float rNorm = clamp((rDisk - uDiskR1) / max(uDiskR2 - uDiskR1, 1e-4), 0.0, 1.0);
+        float ring = 0.85 + 0.15 * sin(rNorm * 18.8495559);
+        vec3 innerHot = vec3(1.0, 0.92, 0.65);
+        vec3 outerWarm = vec3(0.95, 0.28, 0.08);
+        vec3 diskCol = mix(innerHot, outerWarm, rNorm) * ring;
+        color = vec4(diskCol, 1.0);
+    }
+    else if (hitBlackHole)
+    {
+        color = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    else if (hitObject)
+    {
+        vec3 N = normalize(uHitObjPoint - uHitObjCenter);
+        vec3 uCam = (u_cam.camPos_tanHalfFov.xyz - bhCenter) * invRs;
+        vec3 V = normalize(uCam - uHitObjPoint);
+        float ambient = 0.14;
+        float diff = max(dot(N, V), 0.0);
+        float intensity = ambient + (1.0 - ambient) * diff;
+        color = vec4(hitObjColor.rgb * intensity, 1.0);
+    }
+
+    imageStore(outImage, pix, color);
+}
+

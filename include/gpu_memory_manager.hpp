@@ -3,6 +3,7 @@
 #include <GL/glew.h>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 
 enum class BufferRole : std::uint8_t
@@ -23,6 +24,9 @@ enum class BufferRole : std::uint8_t
     ObjectAcceleration,
     ObjectRender,
     ObjectCollision,
+    // Shared grid deformation source list (pass-scoped SSBO binding 1; shares slot 1 with
+    // NextState across distinct passes so maximum SSBO binding remains <= 15).
+    GridSources,
 };
 
 enum class GpuStorageMode : std::uint8_t
@@ -43,6 +47,14 @@ enum class MappingMode : std::uint8_t
     None,
     Persistent,
     PersistentCoherent,
+};
+
+enum class FencePollStatus : std::uint8_t
+{
+    NoFence,
+    Pending,
+    Signaled,
+    Failed,
 };
 
 constexpr GLuint BindingFor(BufferRole role)
@@ -81,8 +93,52 @@ constexpr GLuint BindingFor(BufferRole role)
         return 14;
     case BufferRole::ObjectCollision:
         return 15;
+    case BufferRole::GridSources:
+        return 1;
     }
     return 0;
+}
+
+constexpr const char *BufferRoleName(BufferRole role)
+{
+    switch (role)
+    {
+    case BufferRole::CurrentState:
+        return "CurrentState";
+    case BufferRole::NextState:
+        return "NextState";
+    case BufferRole::ObjectPhysical:
+        return "ObjectPhysical";
+    case BufferRole::ObjectControl:
+        return "ObjectControl";
+    case BufferRole::BaseGrid:
+        return "BaseGrid";
+    case BufferRole::DeformedGrid:
+        return "DeformedGrid";
+    case BufferRole::MassField:
+        return "MassField";
+    case BufferRole::BlurFieldA:
+        return "BlurFieldA";
+    case BufferRole::BlurFieldB:
+        return "BlurFieldB";
+    case BufferRole::AccelerationField:
+        return "AccelerationField";
+    case BufferRole::LODMetadata:
+        return "LODMetadata";
+    case BufferRole::Metrics:
+        return "Metrics";
+    case BufferRole::ObjectDerived:
+        return "ObjectDerived";
+    case BufferRole::ObjectAcceleration:
+        return "ObjectAcceleration";
+    case BufferRole::ObjectRender:
+        return "ObjectRender";
+    case BufferRole::ObjectCollision:
+        return "ObjectCollision";
+    case BufferRole::GridSources:
+        return "GridSources";
+    }
+    return "Unknown";
 }
 
 struct GpuBufferDescription
@@ -146,6 +202,9 @@ class GpuSynchronization
     ~GpuSynchronization();
     void WaitForGpuCompletion();
     void FenceGpuCompletion();
+    void CreateFreshFence();
+    FencePollStatus PollCompletion();
+    bool HasActiveFence() const { return fence_ != nullptr; }
     void Reset();
 
   private:
@@ -155,33 +214,45 @@ class GpuSynchronization
 class GpuMemoryManager
 {
   public:
-    GpuBuffer &Create(const GpuBufferDescription &bufferDescription);
+    GpuBuffer &Create(const GpuBufferDescription &bufferDescription, bool bindImmediately = true);
     void Destroy(BufferRole role);
-    void Resize(BufferRole role, std::size_t newCapacity);
+    void DestroyRoles(const BufferRole *roles, std::size_t count, bool alreadyQuiescent = false);
+    void DestroyRoles(std::initializer_list<BufferRole> roles, bool alreadyQuiescent = false);
+    void Resize(BufferRole role, std::size_t newCapacity, bool rebindImmediately = true);
     void Upload(BufferRole role, const void *data, std::size_t byteCount, std::size_t logicalCount,
                 std::size_t byteOffset = 0);
     void Bind(BufferRole role) const;
+    void Bind(BufferRole role, GLuint explicitBinding) const;
     void SwapCurrentNext();
     void WaitForGpuCompletion();
     void FenceGpuCompletion();
+    void CreateFreshFence();
+    FencePollStatus PollGpuCompletion();
     GpuBuffer &Get(BufferRole role);
     const GpuBuffer &Get(BufferRole role) const;
     bool Contains(BufferRole role) const;
     void Shutdown();
 
+    std::size_t ActiveBufferCount() const { return buffers_.size(); }
     std::size_t LogicalBytes() const;
     std::size_t AllocatedBytes() const;
     std::size_t PeakAllocatedBytes() const { return peakAllocatedBytes_; }
+    std::size_t ScenePeakAllocatedBytes() const { return scenePeakAllocatedBytes_; }
+    void ResetScenePeakAllocation();
     std::size_t AllocationCount() const { return allocationCount_; }
     std::size_t ReallocationCount() const { return reallocationCount_; }
     std::size_t MappedBufferCount() const;
     std::size_t PersistentMappedBytes() const;
 
+    const std::map<BufferRole, GpuBuffer> &Buffers() const { return buffers_; }
+
   private:
+    void UnbindIfCurrentlyBound(const GpuBuffer &buffer) const;
     void UpdatePeakAllocation();
     std::map<BufferRole, GpuBuffer> buffers_;
     GpuSynchronization synchronization_;
     std::size_t peakAllocatedBytes_ = 0;
+    std::size_t scenePeakAllocatedBytes_ = 0;
     std::size_t allocationCount_ = 0;
     std::size_t reallocationCount_ = 0;
 };

@@ -43,7 +43,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
-        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic"
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic"
       }
     },
     {
@@ -53,7 +54,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
-        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic"
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic"
       }
     }
   ],

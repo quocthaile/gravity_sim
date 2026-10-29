@@ -1,0 +1,27 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState objects[]; };
+layout(std430, binding = 12) readonly buffer ObjectDerivedBuffer { vec4 radiusRs[]; };
+layout(std430, binding = 1) writeonly buffer GridSourcesBuffer { vec4 sources[]; };
+
+uniform uint u_objectCount;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= u_objectCount)
+    {
+        return;
+    }
+
+    sources[index] = vec4(objects[index].position.xyz, radiusRs[index].y);
+}
+

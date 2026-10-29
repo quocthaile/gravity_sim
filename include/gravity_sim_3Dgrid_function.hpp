@@ -24,6 +24,25 @@ extern double dt;
 void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
                    double dt);
 
+struct TrajectoryRecordEntryV2
+{
+    std::uint32_t logicalObjectId = 0;
+    glm::vec3 position{0.0f};
+};
+
+struct TrajectorySampleV2
+{
+    std::uint64_t sceneGeneration = 0;
+    std::uint64_t simulationStep = 0;
+    double nominalTimeSeconds = 0.0;
+    std::vector<TrajectoryRecordEntryV2> entries;
+};
+
+void CaptureGpuTrajectorySampleV2(std::vector<TrajectorySampleV2> &samples,
+                                  std::uint64_t sceneGeneration, std::uint64_t simulationStep,
+                                  double nominalTimeSeconds);
+bool SavePositionsV2(const std::string &filename, const std::vector<TrajectorySampleV2> &samples);
+
 class Object;
 
 // Stable logical object identity used for validation/result matching. It is independent of the
@@ -35,6 +54,7 @@ struct ShaderPrograms
 {
     GLuint gridRendering = 0;
     GLuint gridCompute = 0;
+    GLuint gridSourceCompute = 0;
     GLuint objectRendering = 0;
     GLuint nbodyCompute = 0;
     GLuint integrateCompute = 0;
@@ -59,23 +79,38 @@ struct ComputeUniformLocations
     GLint integrateObjectCount = -1;
     GLint integratePaused = -1;
 
-    GLint gridObjectCount = -1;
+    GLint gridSourceObjectCount = -1;
+
+    GLint gridSourceCount = -1;
     GLint gridWidth = -1;
     GLint gridHeight = -1;
+    GLint gridMetersPerWorldUnit = -1;
+    GLint gridDeformationAmplitudeWorld = -1;
+    GLint gridClampDelta = -1;
 };
 
-GLFWwindow *StartGLU();
+constexpr std::array<BufferRole, 8> kGravityObjectBufferRoles = {
+    BufferRole::CurrentState,   BufferRole::NextState,          BufferRole::ObjectPhysical,
+    BufferRole::ObjectDerived,  BufferRole::ObjectControl,      BufferRole::ObjectAcceleration,
+    BufferRole::ObjectRender,   BufferRole::ObjectCollision,
+};
+
+GLFWwindow *StartGLU(int width = 1920, int height = 1080,
+                     const char *title = "GRAVITY SIMULATION - 3D GRID", bool visible = true);
 std::string LoadShaderSource(const std::string &filePath);
 void CreateShaderProgram(ShaderPrograms &programs);
 void InitializeComputeUniformLocations(const ShaderPrograms &programs,
                                        ComputeUniformLocations &locations);
 // inline const glm::vec3 kInitialCameraPosition(0.0f, 1000.0f, 5000.0f);
-glm::mat4 CreateScenePerspectiveProjection();
+glm::mat4 CreateScenePerspectiveProjection(float aspect = 1920.0f / 1080.0f);
 void InitializeGridRenderingUniforms(GLuint gridProgram, ShaderUniformLocations &uniformLocations);
 void InitializeObjectRenderingUniforms(GLuint objectProgram,
                                        ShaderUniformLocations &uniformLocations);
 void CreateUnitSphere();
 void DestroyObjectRenderingResources();
+GLuint GetUnitSphereVao();
+GLuint GetUnitSphereVbo();
+GLsizei GetUnitSphereVertexCount();
 GLuint CreateGraphicsProgram(const std::string &vertexFilePath,
                              const std::string &fragmentFilePath);
 GLuint CreateComputeProgram(const std::string &filePath);
@@ -85,6 +120,10 @@ void CreateMeshBuffers(GLuint &VAO, GLuint &vbo, const float *vertices, size_t v
 std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices);
+void InitializeObjectComputeBuffers(size_t initialObjectCount);
+void BindAllObjectComputeBuffers();
+void ReleaseObjectComputeBuffers(bool alreadyQuiescent = false);
+void RetireInitializingObjects();
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                      size_t objectCount, float epsilon);
@@ -94,8 +133,11 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            const ComputeUniformLocations &locations, size_t objectCount,
                            float epsilon, bool paused);
+void RunGridSourceMaterialization(GLuint gridSourceShaderProgram,
+                                  const ComputeUniformLocations &locations, size_t objectCount);
 void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                    size_t objectCount);
+                    size_t sourceCount, float metersPerWorldUnit = 1000.0f,
+                    float deformationAmplitudeWorld = 2.0e11f, float clampDelta = 0.0001f);
 void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions);
 void Cleanup(const ShaderPrograms &shaderPrograms);
 void BeginFrame();
@@ -116,6 +158,8 @@ std::vector<unsigned int> CreateGridIndices(int divisions);
 std::vector<Object> CreateRandomOrbiters(int count, const glm::vec3 &center, float centralMass);
 std::vector<Object> CreateObjects(const std::string &objectFilePath = {},
                                   int randomObjectCount = 0);
+std::vector<Object> CreateLegacyThreeBodyObjects();
+
 class Object
 {
   public:
@@ -148,31 +192,34 @@ class Object
         this->velocity = initVelocity;
         this->mass = mass;
         this->density = density;
-        this->radius =
-            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
-        this->rs = (2 * kGravitationalConstant * this->mass) / (kSpeedOfLight * kSpeedOfLight);
+        this->radius = static_cast<float>(
+            std::pow(((3.0 * this->mass / this->density) / (4.0 * 3.14159265359)), (1.0 / 3.0)) /
+            100000.0);
+        this->rs = static_cast<float>((2.0 * kGravitationalConstant * this->mass) /
+                                      (static_cast<double>(kSpeedOfLight) * kSpeedOfLight));
     }
-    void UpdatePosition(double dt)
+    void UpdatePosition(double stepDt)
     {
         // this->position[0] += this->velocity[0] / 94;
         // this->position[1] += this->velocity[1] / 94;
         // this->position[2] += this->velocity[2] / 94;
-        this->position[0] += this->velocity[0] * dt;
-        this->position[1] += this->velocity[1] * dt;
-        this->position[2] += this->velocity[2] * dt;
-        this->radius =
-            pow(((3 * this->mass / this->density) / (4 * 3.14159265359)), (1.0f / 3.0f)) / 100000;
+        this->position[0] += static_cast<float>(this->velocity[0] * stepDt);
+        this->position[1] += static_cast<float>(this->velocity[1] * stepDt);
+        this->position[2] += static_cast<float>(this->velocity[2] * stepDt);
+        this->radius = static_cast<float>(
+            std::pow(((3.0 * this->mass / this->density) / (4.0 * 3.14159265359)), (1.0 / 3.0)) /
+            100000.0);
     }
     glm::vec3 GetPosition() const { return this->position; }
 
-    void Accelerate(float x, float y, float z, double dt)
+    void Accelerate(float x, float y, float z, double stepDt)
     {
         // this->velocity[0] += x / 96;
         // this->velocity[1] += y / 96;
         // this->velocity[2] += z / 96;
-        this->velocity[0] += x * dt;
-        this->velocity[1] += y * dt;
-        this->velocity[2] += z * dt;
+        this->velocity[0] += static_cast<float>(x * stepDt);
+        this->velocity[1] += static_cast<float>(y * stepDt);
+        this->velocity[2] += static_cast<float>(z * stepDt);
     }
 
     float CheckCollision(const Object &other)

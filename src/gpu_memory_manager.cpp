@@ -88,6 +88,11 @@ void GpuBuffer::AllocateStorage()
             storageFlags |= GL_MAP_COHERENT_BIT;
             mappingFlags |= GL_MAP_COHERENT_BIT;
         }
+        else if (bufferDescription_.mappingMode == MappingMode::Persistent &&
+                 (mappingFlags & GL_MAP_WRITE_BIT) != 0)
+        {
+            mappingFlags |= GL_MAP_FLUSH_EXPLICIT_BIT;
+        }
     }
 
     glBindBuffer(bufferDescription_.target, handle_);
@@ -155,6 +160,13 @@ void GpuBuffer::Upload(const void *data, std::size_t byteCount, std::size_t byte
     if (mappedPtr_ != nullptr && cpuCanWrite)
     {
         std::memcpy(static_cast<std::byte *>(mappedPtr_) + byteOffset, data, byteCount);
+        if (bufferDescription_.mappingMode == MappingMode::Persistent)
+        {
+            glBindBuffer(bufferDescription_.target, handle_);
+            glFlushMappedBufferRange(bufferDescription_.target, static_cast<GLintptr>(byteOffset),
+                                     static_cast<GLsizeiptr>(byteCount));
+            glBindBuffer(bufferDescription_.target, 0);
+        }
         return;
     }
 
@@ -213,10 +225,14 @@ void GpuSynchronization::WaitForGpuCompletion()
     }
     if (result == GL_WAIT_FAILED)
     {
+        glDeleteSync(fence_);
+        fence_ = nullptr;
         throw std::runtime_error("GPU fence wait failed");
     }
     if (result != GL_ALREADY_SIGNALED && result != GL_CONDITION_SATISFIED)
     {
+        glDeleteSync(fence_);
+        fence_ = nullptr;
         throw std::runtime_error("GPU fence wait returned an unexpected result");
     }
     glDeleteSync(fence_);
@@ -234,6 +250,38 @@ void GpuSynchronization::FenceGpuCompletion()
     }
 }
 
+void GpuSynchronization::CreateFreshFence()
+{
+    FenceGpuCompletion();
+    // Ensure the fresh fence is flushed into the GL server queue so subsequent non-blocking polls
+    // make forward progress without blocking the UI thread.
+    glFlush();
+}
+
+FencePollStatus GpuSynchronization::PollCompletion()
+{
+    if (fence_ == nullptr)
+    {
+        return FencePollStatus::NoFence;
+    }
+
+    const GLenum result = glClientWaitSync(fence_, GL_SYNC_FLUSH_COMMANDS_BIT, 250000ULL);
+    if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED)
+    {
+        glDeleteSync(fence_);
+        fence_ = nullptr;
+        return FencePollStatus::Signaled;
+    }
+    if (result == GL_TIMEOUT_EXPIRED)
+    {
+        return FencePollStatus::Pending;
+    }
+
+    glDeleteSync(fence_);
+    fence_ = nullptr;
+    return FencePollStatus::Failed;
+}
+
 void GpuSynchronization::Reset()
 {
     if (fence_ != nullptr)
@@ -243,7 +291,8 @@ void GpuSynchronization::Reset()
     }
 }
 
-GpuBuffer &GpuMemoryManager::Create(const GpuBufferDescription &bufferDescription)
+GpuBuffer &GpuMemoryManager::Create(const GpuBufferDescription &bufferDescription,
+                                    bool bindImmediately)
 {
     if (buffers_.contains(bufferDescription.role))
     {
@@ -257,20 +306,91 @@ GpuBuffer &GpuMemoryManager::Create(const GpuBufferDescription &bufferDescriptio
     }
     ++allocationCount_;
     UpdatePeakAllocation();
-    it->second.BindBase();
+    if (bindImmediately)
+    {
+        it->second.BindBase();
+    }
     return it->second;
+}
+
+void GpuMemoryManager::UnbindIfCurrentlyBound(const GpuBuffer &buffer) const
+{
+    if (buffer.Handle() == 0)
+    {
+        return;
+    }
+
+    const GLenum target = buffer.Desc().target;
+    if (target == GL_SHADER_STORAGE_BUFFER)
+    {
+        const GLuint slot = BindingFor(buffer.Desc().role);
+        GLint boundHandle = 0;
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, slot, &boundHandle);
+        if (static_cast<GLuint>(boundHandle) == buffer.Handle())
+        {
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, slot, 0);
+        }
+    }
 }
 
 void GpuMemoryManager::Destroy(BufferRole role)
 {
-    if (buffers_.contains(role))
+    auto it = buffers_.find(role);
+    if (it != buffers_.end())
     {
         WaitForGpuCompletion();
-        buffers_.erase(role);
+        UnbindIfCurrentlyBound(it->second);
+        buffers_.erase(it);
     }
 }
 
-void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
+void GpuMemoryManager::DestroyRoles(const BufferRole *roles, std::size_t count,
+                                    bool alreadyQuiescent)
+{
+    if (roles == nullptr || count == 0)
+    {
+        return;
+    }
+
+    bool anyPresent = false;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (buffers_.contains(roles[i]))
+        {
+            anyPresent = true;
+            break;
+        }
+    }
+    if (!anyPresent)
+    {
+        return;
+    }
+
+    if (!alreadyQuiescent)
+    {
+        // Create a fresh fence after the final workload of the retiring scene rather than relying
+        // on any older checkpoint fence.
+        synchronization_.CreateFreshFence();
+        synchronization_.WaitForGpuCompletion();
+    }
+
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        auto it = buffers_.find(roles[i]);
+        if (it != buffers_.end())
+        {
+            UnbindIfCurrentlyBound(it->second);
+            buffers_.erase(it);
+        }
+    }
+}
+
+void GpuMemoryManager::DestroyRoles(std::initializer_list<BufferRole> roles, bool alreadyQuiescent)
+{
+    DestroyRoles(roles.begin(), roles.size(), alreadyQuiescent);
+}
+
+void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity, bool rebindImmediately)
 {
     GpuBuffer &buffer = Get(role);
     if (buffer.Capacity() == newCapacity)
@@ -279,7 +399,10 @@ void GpuMemoryManager::Resize(BufferRole role, std::size_t newCapacity)
     }
     WaitForGpuCompletion();
     buffer.Resize(newCapacity);
-    buffer.BindBase();
+    if (rebindImmediately)
+    {
+        buffer.BindBase();
+    }
     ++reallocationCount_;
     UpdatePeakAllocation();
 }
@@ -298,6 +421,11 @@ void GpuMemoryManager::Upload(BufferRole role, const void *data, std::size_t byt
 
 void GpuMemoryManager::Bind(BufferRole role) const { Get(role).BindBase(); }
 
+void GpuMemoryManager::Bind(BufferRole role, GLuint explicitBinding) const
+{
+    Get(role).BindBase(explicitBinding);
+}
+
 void GpuMemoryManager::SwapCurrentNext()
 {
     GpuBuffer &currentState = Get(BufferRole::CurrentState);
@@ -312,6 +440,10 @@ void GpuMemoryManager::SwapCurrentNext()
 void GpuMemoryManager::WaitForGpuCompletion() { synchronization_.WaitForGpuCompletion(); }
 
 void GpuMemoryManager::FenceGpuCompletion() { synchronization_.FenceGpuCompletion(); }
+
+void GpuMemoryManager::CreateFreshFence() { synchronization_.CreateFreshFence(); }
+
+FencePollStatus GpuMemoryManager::PollGpuCompletion() { return synchronization_.PollCompletion(); }
 
 GpuBuffer &GpuMemoryManager::Get(BufferRole role)
 {
@@ -337,9 +469,19 @@ bool GpuMemoryManager::Contains(BufferRole role) const { return buffers_.contain
 
 void GpuMemoryManager::Shutdown()
 {
-    synchronization_.WaitForGpuCompletion();
+    if (!buffers_.empty() || synchronization_.HasActiveFence())
+    {
+        synchronization_.CreateFreshFence();
+        synchronization_.WaitForGpuCompletion();
+    }
+    for (const auto &[role, buffer] : buffers_)
+    {
+        (void)role;
+        UnbindIfCurrentlyBound(buffer);
+    }
     buffers_.clear();
     peakAllocatedBytes_ = 0;
+    scenePeakAllocatedBytes_ = 0;
     allocationCount_ = 0;
     reallocationCount_ = 0;
 }
@@ -366,6 +508,11 @@ std::size_t GpuMemoryManager::AllocatedBytes() const
     return total;
 }
 
+void GpuMemoryManager::ResetScenePeakAllocation()
+{
+    scenePeakAllocatedBytes_ = AllocatedBytes();
+}
+
 std::size_t GpuMemoryManager::MappedBufferCount() const
 {
     std::size_t count = 0;
@@ -390,8 +537,13 @@ std::size_t GpuMemoryManager::PersistentMappedBytes() const
 
 void GpuMemoryManager::UpdatePeakAllocation()
 {
-    if (AllocatedBytes() > peakAllocatedBytes_)
+    const std::size_t current = AllocatedBytes();
+    if (current > peakAllocatedBytes_)
     {
-        peakAllocatedBytes_ = AllocatedBytes();
+        peakAllocatedBytes_ = current;
+    }
+    if (current > scenePeakAllocatedBytes_)
+    {
+        scenePeakAllocatedBytes_ = current;
     }
 }

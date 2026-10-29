@@ -1,0 +1,7 @@
+# Sample CSV preset for GravitySim F1/F6 CSV loader
+# Format: posX,posY,posZ,velX,velY,velZ,massKg,densityKgPerM3
+0.0,0.0,0.0,0.0,0.0,0.0,8.50e24,5515.0
+3844.0,0.0,0.0,0.0,0.0,260.0,7.34767309e22,3344.0
+-6200.0,220.0,0.0,0.0,15.0,-205.0,1.45e23,3933.0
+0.0,-180.0,9100.0,-170.0,0.0,0.0,9.10e22,3100.0
+
