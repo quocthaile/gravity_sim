@@ -1,5 +1,9 @@
 # Sơ đồ hệ thống gravity_sim hiện tại
 
+> Lưu trữ theo trạng thái ngày 28/10/2026, trước octree. Các sơ đồ về
+> force, binding 6–9, dispatch và validation bên dưới không còn mô tả runtime
+> hiện tại; xem [mass_aggregation.md](mass_aggregation.md) cho pipeline mới.
+
 Tài liệu đối chiếu trực tiếp mã nguồn ngày **28/10/2026**, tại HEAD `1f873a6`. Phần chính mô tả executable `gravity_sim_3Dgrid`; phụ lục liệt kê cả baseline, validation, công cụ sai số và legacy. Các sơ đồ biểu diễn **mã đã triển khai**, các role/shader chưa nối vào runtime được ghi riêng.
 
 Phạm vi kiểm kê: 23 định nghĩa struct/class C++ do dự án khai báo, 4 enum class và 6 tên struct GLSL khác nhau. Không tính kiểu của thư viện GLM, STL, GLFW/OpenGL; khai báo trước `class Object;` không phải một định nghĩa mới.
@@ -97,7 +101,7 @@ flowchart TD
     TIME --> BEGIN["BeginFrame()<br/>clear color + depth"]
     BEGIN --> CAM["UpdateCamera()<br/>view uniform cho 2 graphics programs"]
     CAM --> SYNC["RunObjectStateSync(window, objectCount)"]
-    SYNC --> TRANS["RunGpuStateTransition(..., epsilon, pause)<br/>nbody → integration → swap"]
+    SYNC --> TRANS["RunGpuStateTransition(..., epsilon, pause, dt)<br/>nbody → integration → swap"]
     TRANS --> SAMPLE{"chưa saved và<br/>(numofFrames+1) chia hết 96?"}
     SAMPLE -->|"có"| CAP["captureGpuTrajectorySample()<br/>wait fence, đọc mapped CurrentState"]
     CAP --> ENOUGH{"đủ số mẫu?"}
@@ -266,14 +270,14 @@ G và phép tính lực dùng double; vị trí, vector gia tốc, phép cộng 
 
 ```text
 nếu !initializing && !paused:
-    vNext = (vCurrent + acceleration / 96.0) * (-0.2)^overlapCount
-    pNext = pCurrent + vNext / 94.0
+    vNext = (vCurrent + acceleration * dt) * (-0.2)^overlapCount
+    pNext = pCurrent + vNext * dt
     giữ nguyên position.w và velocity.w
 ngược lại:
     NextState[i] = CurrentState[i]
 ```
 
-Shader thực hiện nhân `-0.2` trong vòng lặp `overlapCount` lần. Đây là phản ứng va chạm đơn giản dựa trên số overlap của snapshot, không có giải quyết tiếp xúc hay cập nhật cặp đối xứng. Hệ số `/96` và `/94` được hard-code trong shader; **không có uniform dt**, không thể suy ra bước GPU bằng `dt` của CPU. Pass ghi một slot NextState cho mỗi invocation hợp lệ; bình thường O(N), thêm vòng lặp theo overlap count.
+Shader thực hiện nhân `-0.2` trong vòng lặp `overlapCount` lần. Đây là phản ứng va chạm đơn giản dựa trên số overlap của snapshot, không có giải quyết tiếp xúc hay cập nhật cặp đối xứng. Uniform `u_dt` nhận `dt` của CPU (chuyển sang float), dùng chung cho cập nhật vận tốc và vị trí. Pass ghi một slot NextState cho mỗi invocation hợp lệ; bình thường O(N), thêm vòng lặp theo overlap count.
 
 ### 6.3. `grid.comp`: state mới và rs → lưới trực quan
 
@@ -551,6 +555,7 @@ classDiagram
         +GLint nbodyEpsilon
         +GLint integrateObjectCount
         +GLint integratePaused
+        +GLint integrateDt
         +GLint gridObjectCount
         +GLint gridWidth
         +GLint gridHeight
@@ -570,7 +575,7 @@ classDiagram
 |---|---|
 | `ShaderPrograms:34` | 5 `GLuint`: `gridRendering`, `gridCompute`, `objectRendering`, `nbodyCompute`, `integrateCompute`; mặc định 0; mỗi giá trị là program handle. |
 | `ShaderUniformLocations:43` | 6 `GLint`: `gridModel`, `gridObjectColor`, `gridView`, `gridProjection`, `objectView`, `objectProjection`; mặc định -1. |
-| `ComputeUniformLocations:53` | 8 `GLint`: `nbodyObjectCount`, `nbodyGravitationalConstant`, `nbodyEpsilon`, `integrateObjectCount`, `integratePaused`, `gridObjectCount`, `gridWidth`, `gridHeight`; mặc định -1. |
+| `ComputeUniformLocations:53` | 9 `GLint`: `nbodyObjectCount`, `nbodyGravitationalConstant`, `nbodyEpsilon`, `integrateObjectCount`, `integratePaused`, `integrateDt`, `gridObjectCount`, `gridWidth`, `gridHeight`; mặc định -1. |
 | `Object:118` | `uint32_t id=0`; `size_t gpuStateIndex=max`; `glm::vec4 color=(1,0,0,1)`; `glm::vec3 position=(400,300,0), velocity=(0,0,0)`; `bool initializing=false, launched=false, target=false`; `float mass,density,radius,rs`; `glm::vec3 lastPos=position`. |
 | `GpuObjectState:191` | `glm::vec4 position, velocity`; xyz là state, `.w` ban đầu 0 và được integration bảo toàn; 32 B. Cả Current và Next dùng struct này. |
 | `GpuObjectPhysical:197` | `glm::vec4 massDensity`: x=mass, y=density, zw=0; 16 B. N-body hiện chỉ đọc mass. |

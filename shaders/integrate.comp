@@ -29,6 +29,7 @@ struct ObjectCollision
 layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState currentState[]; };
 layout(std430, binding = 1) writeonly buffer NextStateBuffer { ObjectState nextState[]; };
 layout(std430, binding = 3) readonly buffer ObjectControlBuffer { ObjectControl controls[]; };
+layout(std430, binding = 9) readonly buffer TreeMetadataBuffer { uvec4 treeMetadata; };
 layout(std430, binding = 13) readonly buffer ObjectAccelerationBuffer
 {
     ObjectAcceleration accelerations[];
@@ -40,6 +41,7 @@ layout(std430, binding = 15) readonly buffer ObjectCollisionBuffer
 
 uniform uint u_objectCount;
 uniform uint u_paused;
+uniform float u_dt;
 
 void main()
 {
@@ -50,9 +52,9 @@ void main()
     }
 
     ObjectState source = currentState[objectIndex];
-    if (controls[objectIndex].initializing == 0u && u_paused == 0u)
+    if (treeMetadata.y == 0u && controls[objectIndex].initializing == 0u && u_paused == 0u)
     {
-        vec3 velocity = source.velocity.xyz + accelerations[objectIndex].acceleration.xyz / 96.0;
+        vec3 velocity = source.velocity.xyz + accelerations[objectIndex].acceleration.xyz * u_dt;
         float collisionScale = 1.0;
         for (uint overlapIndex = 0u; overlapIndex < collisions[objectIndex].overlapCount;
              ++overlapIndex)
@@ -61,7 +63,7 @@ void main()
         }
         velocity *= collisionScale;
         nextState[objectIndex].position =
-            vec4(source.position.xyz + velocity / 94.0, source.position.w);
+            vec4(source.position.xyz + velocity * u_dt, source.position.w);
         nextState[objectIndex].velocity = vec4(velocity, source.velocity.w);
         return;
     }

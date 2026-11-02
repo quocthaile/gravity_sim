@@ -13,10 +13,10 @@ enum class BufferRole : std::uint8_t
     ObjectControl,
     BaseGrid,
     DeformedGrid,
-    MassField,
-    BlurFieldA,
-    BlurFieldB,
-    AccelerationField,
+    NodeAggregate,
+    TreeTopology,
+    TreeObjectIndex,
+    TreeMetadata,
     LODMetadata,
     Metrics,
     ObjectDerived,
@@ -61,13 +61,13 @@ constexpr GLuint BindingFor(BufferRole role)
         return 4;
     case BufferRole::DeformedGrid:
         return 5;
-    case BufferRole::MassField:
+    case BufferRole::NodeAggregate:
         return 6;
-    case BufferRole::BlurFieldA:
+    case BufferRole::TreeTopology:
         return 7;
-    case BufferRole::BlurFieldB:
+    case BufferRole::TreeObjectIndex:
         return 8;
-    case BufferRole::AccelerationField:
+    case BufferRole::TreeMetadata:
         return 9;
     case BufferRole::LODMetadata:
         return 10;

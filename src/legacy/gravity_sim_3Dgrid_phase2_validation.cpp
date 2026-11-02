@@ -34,9 +34,12 @@ GpuMemoryManager gpuMemoryManager;
 size_t gridNodeCount = 0;
 size_t gridIndexCount = 0;
 size_t objectStateCapacity = 0;
+double dt = 1.0 / 96.0;
 
 namespace
 {
+GLuint treeValidationProgram = 0;
+GLuint collisionValidationProgram = 0;
 struct ReferenceObject
 {
     std::uint32_t id;
@@ -98,7 +101,12 @@ void RunCountedTransition(GLuint nbodyProgram, GLuint integrateProgram,
                           const ComputeUniformLocations &locations, size_t objectCount,
                           float epsilon, bool paused, size_t &transitionCount)
 {
-    RunGpuStateTransition(nbodyProgram, integrateProgram, locations, objectCount, epsilon, paused);
+    ShaderPrograms programs;
+    programs.treeCompute = treeValidationProgram;
+    programs.nbodyCompute = nbodyProgram;
+    programs.collisionCompute = collisionValidationProgram;
+    programs.integrateCompute = integrateProgram;
+    RunGpuStateTransition(programs, locations, objectCount, epsilon, 0.0f, paused, dt);
     ++transitionCount;
 }
 
@@ -277,7 +285,7 @@ std::vector<AccelerationSample> AdvanceReference(std::vector<ReferenceObject> &o
         glm::vec3 position = target.position;
         if (!target.initializing && !paused)
         {
-            velocity += totalAccelerations[targetIndex] / 96.0f;
+            velocity += totalAccelerations[targetIndex] * static_cast<float>(dt);
             float collisionScale = 1.0f;
             for (size_t overlapIndex = 0; overlapIndex < collisionCounts[targetIndex];
                  ++overlapIndex)
@@ -285,7 +293,7 @@ std::vector<AccelerationSample> AdvanceReference(std::vector<ReferenceObject> &o
                 collisionScale *= -0.2f;
             }
             velocity *= collisionScale;
-            position += velocity / 94.0f;
+            position += velocity * static_cast<float>(dt);
         }
 
         nextState[targetIndex].velocity = velocity;
@@ -417,6 +425,8 @@ void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbod
     glDeleteProgram(nbodyProgram);
     glDeleteProgram(integrateProgram);
     glDeleteProgram(gridComputeProgram);
+    glDeleteProgram(treeValidationProgram);
+    glDeleteProgram(collisionValidationProgram);
     if (window != nullptr)
     {
         glfwDestroyWindow(window);
@@ -516,10 +526,14 @@ int main()
         Require(invalidStateRejected, "DrawObjects accepted an out-of-range GPU state slot");
         DrawObjects(renderingProgram, {});
         nbodyProgram = CreateComputeProgram("shaders/nbody.comp");
+        treeValidationProgram = CreateComputeProgram("shaders/build_octree.comp");
+        collisionValidationProgram = CreateComputeProgram("shaders/collision.comp");
         integrateProgram = CreateComputeProgram("shaders/integrate.comp");
         gridComputeProgram = CreateComputeProgram("shaders/grid.comp");
         ShaderPrograms computePrograms;
+        computePrograms.treeCompute = treeValidationProgram;
         computePrograms.nbodyCompute = nbodyProgram;
+        computePrograms.collisionCompute = collisionValidationProgram;
         computePrograms.integrateCompute = integrateProgram;
         computePrograms.gridCompute = gridComputeProgram;
         InitializeComputeUniformLocations(computePrograms, computeUniformLocations);
@@ -529,8 +543,7 @@ int main()
             gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
         const GLuint nextHandleBeforeZeroDispatch =
             gpuMemoryManager.Get(BufferRole::NextState).Handle();
-        RunGpuStateTransition(nbodyProgram, integrateProgram, computeUniformLocations, 0, epsilon,
-                              false);
+        RunGpuStateTransition(computePrograms, computeUniformLocations, 0, epsilon, 0.0f, false, dt);
         Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() ==
                         currentHandleBeforeZeroDispatch &&
                     gpuMemoryManager.Get(BufferRole::NextState).Handle() ==
@@ -571,6 +584,7 @@ int main()
 
         for (size_t step = 1; step <= validationSteps; ++step)
         {
+            dt = step == 2 ? 1.0 / 24.0 : (step == 3 ? 0.0 : 1.0 / 96.0);
             const glm::vec3 initialVelocity = referenceState.front().velocity;
             const std::vector<AccelerationSample> expectedAccelerations =
                 AdvanceReference(referenceState, epsilon, false);
@@ -611,6 +625,19 @@ int main()
             ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                        renderMetrics);
             ValidateGpuState(referenceState, expectedAccelerations, step, validationMetrics);
+            if (step <= 3)
+            {
+                const auto *state =
+                    gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+                for (size_t index = 0; index < referenceState.size(); ++index)
+                {
+                    Require(glm::length(glm::vec3(state[index].position) -
+                                        referenceState[index].position) <= 1.0e-6f &&
+                                glm::length(glm::vec3(state[index].velocity) -
+                                            referenceState[index].velocity) <= 1.0e-6f,
+                            "GPU integration did not use the requested timestep");
+                }
+            }
             if (step == 1)
             {
                 const auto *state =
@@ -717,13 +744,15 @@ int main()
         const auto *launchedState =
             gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
         const glm::vec3 expectedEvenOverlapVelocity =
-            (launchedInitialVelocity + launchedAccelerations.back().acceleration / 96.0f) *
+            (launchedInitialVelocity + launchedAccelerations.back().acceleration *
+                                           static_cast<float>(dt)) *
             (-0.2f * -0.2f);
         Require(glm::length(glm::vec3(launchedState[objs.back().gpuStateIndex].velocity) -
                             expectedEvenOverlapVelocity) <= 1.0e-6f,
                 "Two overlaps did not apply the positive even-parity collision scale");
         const glm::vec3 expectedOddOverlapVelocity =
-            (firstInitialVelocity + launchedAccelerations[0].acceleration / 96.0f) * -0.2f;
+            (firstInitialVelocity + launchedAccelerations[0].acceleration * static_cast<float>(dt)) *
+            -0.2f;
         Require(glm::length(glm::vec3(launchedState[objs[0].gpuStateIndex].velocity) -
                             expectedOddOverlapVelocity) <= 1.0e-6f,
                 "One overlap did not apply the negative odd-parity collision scale");
@@ -808,7 +837,12 @@ int main()
         }
         Require(objs.size() > capacityBeforeGrowth,
                 "Capacity-growth scenario did not exceed the old capacity");
+        const auto resizeStart = std::chrono::steady_clock::now();
         SynchronizeObjectStateBuffers(objectCount, objs.size());
+        const auto resizeEnd = std::chrono::steady_clock::now();
+        std::cout << "256-to-512 object/tree resize and materialization: "
+                  << std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count()
+                  << " ms" << std::endl;
         Require(capacityBeforeGrowth == 256 && objectStateCapacity == 512,
                 "Object state buffers did not grow from 256 to 512 slots");
         ValidateObjectBufferLayout(objectCount);
@@ -879,6 +913,43 @@ int main()
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                    renderMetrics);
         ValidateGpuState(referenceState, growthAccelerations, transitionCount, validationMetrics);
+
+        gpuMemoryManager.WaitForGpuCompletion();
+        auto *stateForFailure =
+            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+        const glm::vec4 savedPosition = stateForFailure[0].position;
+        const GLuint currentBeforeFailure = gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
+        const GLuint nextBeforeFailure = gpuMemoryManager.Get(BufferRole::NextState).Handle();
+        bool rejectedInvalidTheta = false;
+        try
+        {
+            RunGpuStateTransition(computePrograms, computeUniformLocations, objectCount, epsilon,
+                                  std::numeric_limits<float>::quiet_NaN(), false, dt);
+        }
+        catch (const std::invalid_argument &)
+        {
+            rejectedInvalidTheta = true;
+        }
+        Require(rejectedInvalidTheta &&
+                    gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == currentBeforeFailure &&
+                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == nextBeforeFailure,
+                "Invalid theta did not prevent the state swap");
+        stateForFailure[0].position.x = std::numeric_limits<float>::quiet_NaN();
+        bool rejectedInvalidTree = false;
+        try
+        {
+            RunGpuStateTransition(computePrograms, computeUniformLocations, objectCount, epsilon,
+                                  0.0f, false, dt);
+        }
+        catch (const std::runtime_error &)
+        {
+            rejectedInvalidTree = true;
+        }
+        Require(rejectedInvalidTree &&
+                    gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == currentBeforeFailure &&
+                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == nextBeforeFailure,
+                "Invalid tree did not prevent the state swap");
+        stateForFailure[0].position = savedPosition;
 
         const double averageWaitMicroseconds =
             std::chrono::duration<double, std::micro>(totalFenceWait).count() / timingSamples;

@@ -36,7 +36,9 @@ struct ShaderPrograms
     GLuint gridRendering = 0;
     GLuint gridCompute = 0;
     GLuint objectRendering = 0;
+    GLuint treeCompute = 0;
     GLuint nbodyCompute = 0;
+    GLuint collisionCompute = 0;
     GLuint integrateCompute = 0;
 };
 
@@ -52,12 +54,19 @@ struct ShaderUniformLocations
 
 struct ComputeUniformLocations
 {
+    GLint treeObjectCount = -1;
+    GLint treeNodeCapacity = -1;
+    GLint treePass = -1;
+    GLint treeDepth = -1;
     GLint nbodyObjectCount = -1;
     GLint nbodyGravitationalConstant = -1;
     GLint nbodyEpsilon = -1;
+    GLint nbodyTheta = -1;
+    GLint collisionObjectCount = -1;
 
     GLint integrateObjectCount = -1;
     GLint integratePaused = -1;
+    GLint integrateDt = -1;
 
     GLint gridObjectCount = -1;
     GLint gridWidth = -1;
@@ -87,13 +96,13 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                     size_t objectCount, float epsilon);
+                     size_t objectCount, float epsilon, float theta);
 void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                    size_t objectCount, bool paused);
+                    size_t objectCount, bool paused, double timeStep);
 void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
-void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
-                           const ComputeUniformLocations &locations, size_t objectCount,
-                           float epsilon, bool paused);
+void RunGpuStateTransition(const ShaderPrograms &programs, const ComputeUniformLocations &locations,
+                           size_t objectCount, float epsilon, float theta, bool paused,
+                           double timeStep);
 void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                     size_t objectCount);
 void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions);
@@ -230,6 +239,14 @@ struct GpuObjectRender
     glm::vec4 color;
 };
 
+struct GpuTreeNode
+{
+    glm::vec4 centerHalf;
+    glm::uvec4 children0;
+    glm::uvec4 children1;
+    glm::uvec4 data;
+};
+
 static_assert(sizeof(GpuObjectState) == 2 * sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectPhysical) == sizeof(glm::vec4));
 static_assert(sizeof(GpuObjectDerived) == sizeof(glm::vec4));
@@ -238,6 +255,13 @@ static_assert(offsetof(GpuObjectControl, id) == 3 * sizeof(std::uint32_t));
 static_assert(sizeof(GpuObjectAcceleration) == 16);
 static_assert(sizeof(GpuObjectCollision) == 4);
 static_assert(sizeof(GpuObjectRender) == sizeof(glm::vec4));
+static_assert(sizeof(glm::vec4) == 16);
+static_assert(sizeof(glm::uvec4) == 16);
+static_assert(sizeof(glm::uvec2) == 8);
+static_assert(sizeof(GpuTreeNode) == 64);
+static_assert(offsetof(GpuTreeNode, children0) == 16);
+static_assert(offsetof(GpuTreeNode, children1) == 32);
+static_assert(offsetof(GpuTreeNode, data) == 48);
 
 size_t CalculateObjectStateBufferCapacity(size_t requiredCount);
 void ManageObjectStateBufferCapacity(size_t objectCount);

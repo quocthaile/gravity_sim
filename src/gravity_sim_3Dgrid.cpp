@@ -48,6 +48,7 @@ double dt = 1.0 / 96.0;
 int main()
 {
     float epsilon = 10.0f;
+    constexpr float theta = 0.5f;
 
     // Initialize OpenGL resources.
     ShaderPrograms shaderPrograms;
@@ -127,6 +128,7 @@ int main()
         (numSteps + trajectorySampleInterval - 1) / trajectorySampleInterval + 1);
     positions.reserve(trajectorySampleCount);
     bool saved = false;
+    bool simulationFailed = false;
 
     // Capture the initial GPU state for trajectory export.
     CaptureGpuTrajectorySample(positions);
@@ -144,9 +146,18 @@ int main()
         BeginFrame();
         UpdateCamera(shaderPrograms, uniformLocations, cameraPos);
 
-        RunObjectStateSync(window, objectCount);
-        RunGpuStateTransition(shaderPrograms.nbodyCompute, shaderPrograms.integrateCompute,
-                              computeUniformLocations, objectCount, epsilon, pause);
+        try
+        {
+            RunObjectStateSync(window, objectCount);
+            RunGpuStateTransition(shaderPrograms, computeUniformLocations, objectCount, epsilon,
+                                  theta, pause, dt);
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Simulation halted: " << error.what() << '\n';
+            simulationFailed = true;
+            break;
+        }
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)
         {
             CaptureGpuTrajectorySample(positions);
@@ -186,7 +197,7 @@ int main()
         }
         numofFrames++;
     }
-    if (!saved && !positions.empty())
+    if (!simulationFailed && !saved && !positions.empty())
     {
         SavePositions("numerical_error/optimized_positions.csv", positions,
                       dt * trajectorySampleInterval);
@@ -194,5 +205,5 @@ int main()
     // Main loop ends when window is closed or running is set to false.
     // Cleanup OpenGL resources and exit.
     Cleanup(shaderPrograms);
-    return 0;
+    return simulationFailed ? 1 : 0;
 }

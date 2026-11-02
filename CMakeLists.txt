@@ -71,7 +71,9 @@ add_gravity_executable(gravity_sim_3Dgrid
     shaders/grid.vert
     shaders/grid.frag
     shaders/grid.comp
+    shaders/build_octree.comp
     shaders/nbody.comp
+    shaders/collision.comp
     shaders/integrate.comp
     shaders/objects.vert
     shaders/objects.frag
@@ -84,7 +86,9 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.vert
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.frag
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/build_octree.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/nbody.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/collision.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/integrate.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.vert
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.frag
@@ -97,6 +101,21 @@ add_gravity_executable(gravity_sim_3Dgrid_baseline
     shaders/grid.frag
     shaders/grid.comp
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_gravity_executable(gravity_mass_aggregation_test tests/mass_aggregation_test.cpp)
+    add_test(NAME gravity_mass_aggregation
+        COMMAND gravity_mass_aggregation_test ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+    add_gravity_executable(gravity_state_transition_test
+        src/legacy/gravity_sim_3Dgrid_phase2_validation.cpp
+        src/gravity_sim_3Dgrid_function.cpp
+        src/gpu_memory_manager.cpp)
+    add_dependencies(gravity_state_transition_test gravity_sim_3Dgrid)
+    add_test(NAME gravity_state_transition COMMAND gravity_state_transition_test)
+    set_tests_properties(gravity_state_transition PROPERTIES
+        WORKING_DIRECTORY $<TARGET_FILE_DIR:gravity_sim_3Dgrid>)
+endif()
 
 add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
