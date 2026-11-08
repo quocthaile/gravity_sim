@@ -1,9 +1,5 @@
 # GravitySim GPU-Resident Object State Architecture
 
-> Tài liệu thiết kế các giai đoạn trước mass aggregation; các đoạn mô tả solver
-> direct và binding dự phòng đã cũ. Xem [mass_aggregation.md](mass_aggregation.md)
-> để biết runtime octree và kết quả kiểm thử hiện tại.
-
 ## 1. Mục đích
 
 Tài liệu này mô tả kiến trúc mục tiêu cho `gravity_sim` trên nhánh `feat/gpu-memory`, tập trung vào việc chuyển dữ liệu object từ CPU sang GPU-resident storage và từng bước chuyển quyền sở hữu simulation state sang GPU.

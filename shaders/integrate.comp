@@ -29,7 +29,6 @@ struct ObjectCollision
 layout(std430, binding = 0) readonly buffer CurrentStateBuffer { ObjectState currentState[]; };
 layout(std430, binding = 1) writeonly buffer NextStateBuffer { ObjectState nextState[]; };
 layout(std430, binding = 3) readonly buffer ObjectControlBuffer { ObjectControl controls[]; };
-layout(std430, binding = 9) readonly buffer TreeMetadataBuffer { uvec4 treeMetadata; };
 layout(std430, binding = 13) readonly buffer ObjectAccelerationBuffer
 {
     ObjectAcceleration accelerations[];
@@ -52,7 +51,7 @@ void main()
     }
 
     ObjectState source = currentState[objectIndex];
-    if (treeMetadata.y == 0u && controls[objectIndex].initializing == 0u && u_paused == 0u)
+    if (controls[objectIndex].initializing == 0u && u_paused == 0u)
     {
         vec3 velocity = source.velocity.xyz + accelerations[objectIndex].acceleration.xyz * u_dt;
         float collisionScale = 1.0;

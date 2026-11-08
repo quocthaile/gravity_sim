@@ -16,20 +16,39 @@ GPU-resident means an OpenGL buffer has immutable storage allocated with `glBuff
 | `ObjectControl` | 3 | Persistent coherent CPU write | Initializing, launched, and target flags plus stable object `id` |
 | `BaseGrid` | 4 | GPU-only | Static grid input |
 | `DeformedGrid` | 5 | GPU-only | Grid compute output; also the grid VAO vertex source |
-| `NodeAggregate` | 6 | GPU-only | Node center of mass and mass, one `vec4` per node |
-| `TreeTopology` | 7 | GPU-only | Octree node records, 64 bytes per node |
-| `TreeObjectIndex` | 8 | GPU-only | Leaf linked-list and build scratch, one `uvec2` per object slot |
-| `TreeMetadata` | 9 | GPU-only | Node count, error flags and build scratch, one `uvec4` |
-| `LODMetadata` | 10 | GPU-only | Reserved |
-| `Metrics` | 11 | GPU-only | Reserved |
+| `MassField` | 6 | GPU-only | Per-node Center of Mass (`xyz`) and total mass (`w`) |
+| `OctreeNodes` | 7 | GPU-only | 64-byte Octree node records |
+| `ObjectIndexList` | 8 | GPU-only | Original object slots grouped into leaf ranges |
+| `AccelerationField` | 9 | GPU-only | Reserved; not allocated |
+| `OctreeMetadata` | 10 | GPU-only | One 64-byte tree state, count, capacity, and root-bounds record |
+| `ObjectLeafIndex` | 11 | GPU-only | Original object slot to leaf index, or `0xFFFFFFFF` |
 | `ObjectDerived` | 12 | Persistent coherent CPU write | Radius and Schwarzschild radius; the vertex shader uses radius as visual scale |
 | `ObjectAcceleration` | 13 | Persistent coherent CPU observation | One `vec4 acceleration`: net gravity from the current snapshot; 16 bytes/body |
 | `ObjectRender` | 14 | Persistent coherent CPU write | Per-object color read by the vertex shader |
-| `ObjectCollision` | 15 | Persistent coherent CPU initialization and observation | One `uint32 overlapCount`; rewritten by the collision pass for every dispatched target; 4 bytes/body |
+| `ObjectCollision` | 15 | Persistent coherent CPU initialization and observation | One `uint32 overlapCount`; rewritten by N-body for every dispatched target; 4 bytes/body |
 
 `CurrentState` and `NextState` are logical roles, not permanent physical buffer identities. `GpuMemoryManager::SwapCurrentNext()` exchanges the owned buffers without copying storage, updates each buffer's role, and rebinds SSBO slots 0 and 1. Consequently `Get(CurrentState)` and its `MappedPtr` always resolve to the current timestep after a swap.
 
-The C++ and GLSL ABI uses matching std430 records for `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, `GpuObjectCollision`, and `GpuObjectRender`. Rendering uses one shared unit-sphere VAO/VBO; `Object` retains logical identity, visual color, simulation/control metadata, and its GPU slot, but no longer owns duplicate mesh resources.
+The C++ and GLSL ABI uses matching std430 records for `GpuObjectState`, `GpuObjectPhysical`, `GpuObjectDerived`, `GpuObjectControl`, `GpuObjectAcceleration`, `GpuObjectCollision`, `GpuObjectRender`, `GpuMassAggregate`, `GpuOctreeNode`, and `GpuOctreeMetadata`. Rendering uses one shared unit-sphere VAO/VBO; `Object` retains logical identity, visual color, simulation/control metadata, and its GPU slot, but no longer owns duplicate mesh resources.
+
+### Octree capacity and lifecycle
+
+The Octree buffers are allocated by `ComputePipeline()` but are not consumed by a
+compute shader yet. With the current object capacity of 256 and maximum depth 16,
+node capacity is `1 + objectCapacity * maxDepth = 4,097`. `MassField` uses
+16 bytes/node, `OctreeNodes` 64 bytes/node, each object-index array 4 bytes/object,
+and `OctreeMetadata` has one 64-byte element. All five use `GpuResident`,
+`CpuAccess::None`, and `MappingMode::None`; initial metadata is uploaded once with
+status `Uninitialized` and the selected node capacity.
+
+Before allocation or capacity resize, each Octree SSBO's byte size is checked
+against `GL_MAX_SHADER_STORAGE_BLOCK_SIZE` and `GLsizeiptr`. Binding points 6-8,
+10, and 11 are verified against the actual SSBO bindings after creation and
+resize. When object capacity changes, both object-index arrays resize with the
+object buffers and both node-sized arrays resize together. Their CPU logical
+counts are reset to zero and metadata is reset to `Uninitialized`; when tree
+construction is implemented, `OctreeMetadata.counts.y` remains the GPU-authored
+source of actual node count. Binding 9 remains unallocated.
 
 ### Per-object layouts and accounting
 
@@ -50,16 +69,16 @@ The C++ and GLSL ABI uses matching std430 records for `GpuObjectState`, `GpuObje
 units, and the shader's distance conversion by 1000, acceleration is expressed in m/s^2. The
 collision record is independent: `overlapCount` counts other non-initializing objects for which
 the existing nonzero-distance test passes and `target.radius + source.radius > distance`.
-Self-interaction is excluded. The force and collision passes each overwrite their record for every
-valid target; initializing targets write zero to both, and new slots are initialized to zero before
+Self-interaction is excluded. Both records are overwritten for every valid target each N-body
+dispatch; initializing targets write zero to both, and new slots are initialized to zero before
 their first dispatch.
 
-Integration first computes `vGravity = vCurrent + acceleration * dt`, then applies the separate
-collision factor `(-0.2)^overlapCount` to that velocity, and advances position by `vNext * dt`.
+Integration first computes `vGravity = vCurrent + acceleration / 96`, then applies the separate
+collision factor `(-0.2)^overlapCount` to that velocity, and advances position by `vNext / 94`.
 An odd count reverses sign; an even count preserves sign; the magnitude is `0.2^count` and can
 underflow to zero for sufficiently large counts. The response is now independent of source-loop
 ordering, but is not trajectory-equivalent to the former ordered collision-weighted accumulation.
-Paused and initializing records copy both state vectors exactly; while paused, force/collision diagnostics
+Paused and initializing records copy both state vectors exactly; while paused, N-body diagnostics
 are still calculated, whereas initializing targets write zero acceleration and collision output.
 
 The eight buffers therefore require 148 bytes per logical object and 148 bytes per capacity slot:
@@ -78,7 +97,7 @@ The GPU slot is a packed storage location, not an identity. CPU validation match
 
 ## Runtime state transition
 
-CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. Each frame, `RunObjectStateSync()` processes initializing-object input, appends new objects when required, and synchronizes changed metadata before physics dispatch. The GPU rebuilds and aggregates the octree from `CurrentState`, then the CPU reads the 16-byte build status; on success, `nbody.comp` traverses the tree, `collision.comp` counts exact overlaps and `integrate.comp` writes `NextState`. Barriers order the passes, and `SwapCurrentNext()` changes logical roles and rebinds bindings 0/1. A failed tree build stops the transition without a swap. `RunGridCompute()` reads the newly active state and keeps its existing vertex-fetch barrier for `DeformedGrid`. `DrawObjects()` binds the current state at SSBO binding 0 and submits one instanced draw. There is no per-frame CPU readback of all positions; the status read is synchronous. See [mass_aggregation.md](mass_aggregation.md) for capacity and validation.
+CPU `Object` data initializes GPU state and handles lifecycle/control events. The main program materializes its initial object list immediately after creating the state buffers. Each frame, `RunObjectStateSync()` processes initializing-object input, appends new objects when required, and synchronizes changed metadata before physics dispatch. During normal frames, `nbody.comp` reads logical `CurrentState`; `integrate.comp` writes logical `NextState`; its `GL_SHADER_STORAGE_BARRIER_BIT` orders compute writes before later shader access, then `SwapCurrentNext()` changes logical roles and rebinds bindings 0/1. `RunGridCompute()` reads the newly active state and keeps its existing vertex-fetch barrier for `DeformedGrid`. `DrawObjects()` then explicitly binds the current logical role at SSBO binding 0 (plus `ObjectDerived` at 12 and `ObjectRender` at 14) and submits one instanced draw. The shader reads the new current state directly; no CPU position read or wait occurs in the render path.
 
 New objects are materialized by `objectGpuState` in their new slots. Parameter/control changes are detected and written only for the affected object by `SynchronizeObjectGpuProperties`. Position changes while the newest object is initializing use `UploadInitializingObjectState` for that one slot in both state buffers. `GpuBuffer::Upload` remains available for initialization uploads such as `BaseGrid`.
 

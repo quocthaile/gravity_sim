@@ -13,12 +13,12 @@ enum class BufferRole : std::uint8_t
     ObjectControl,
     BaseGrid,
     DeformedGrid,
-    NodeAggregate,
-    TreeTopology,
-    TreeObjectIndex,
-    TreeMetadata,
-    LODMetadata,
-    Metrics,
+    MassField,
+    OctreeNodes,
+    ObjectIndexList,
+    AccelerationField,
+    OctreeMetadata,
+    ObjectLeafIndex,
     ObjectDerived,
     ObjectAcceleration,
     ObjectRender,
@@ -61,17 +61,17 @@ constexpr GLuint BindingFor(BufferRole role)
         return 4;
     case BufferRole::DeformedGrid:
         return 5;
-    case BufferRole::NodeAggregate:
+    case BufferRole::MassField:
         return 6;
-    case BufferRole::TreeTopology:
+    case BufferRole::OctreeNodes:
         return 7;
-    case BufferRole::TreeObjectIndex:
+    case BufferRole::ObjectIndexList:
         return 8;
-    case BufferRole::TreeMetadata:
+    case BufferRole::AccelerationField:
         return 9;
-    case BufferRole::LODMetadata:
+    case BufferRole::OctreeMetadata:
         return 10;
-    case BufferRole::Metrics:
+    case BufferRole::ObjectLeafIndex:
         return 11;
     case BufferRole::ObjectDerived:
         return 12;
@@ -84,6 +84,12 @@ constexpr GLuint BindingFor(BufferRole role)
     }
     return 0;
 }
+
+static_assert(BindingFor(BufferRole::MassField) == 6);
+static_assert(BindingFor(BufferRole::OctreeNodes) == 7);
+static_assert(BindingFor(BufferRole::ObjectIndexList) == 8);
+static_assert(BindingFor(BufferRole::OctreeMetadata) == 10);
+static_assert(BindingFor(BufferRole::ObjectLeafIndex) == 11);
 
 struct GpuBufferDescription
 {

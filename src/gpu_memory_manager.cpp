@@ -93,14 +93,6 @@ void GpuBuffer::AllocateStorage()
     glBindBuffer(bufferDescription_.target, handle_);
     glBufferStorage(bufferDescription_.target, static_cast<GLsizeiptr>(AllocatedBytes()), nullptr,
                     storageFlags);
-    GLint64 actualSize = 0;
-    glGetBufferParameteri64v(bufferDescription_.target, GL_BUFFER_SIZE, &actualSize);
-    if (actualSize != static_cast<GLint64>(AllocatedBytes()))
-    {
-        glBindBuffer(bufferDescription_.target, 0);
-        Reset();
-        throw std::runtime_error("Unable to allocate requested GPU buffer storage");
-    }
     if (bufferDescription_.mappingMode != MappingMode::None)
     {
         mappedPtr_ = glMapBufferRange(bufferDescription_.target, 0,
@@ -108,7 +100,6 @@ void GpuBuffer::AllocateStorage()
         if (mappedPtr_ == nullptr)
         {
             glBindBuffer(bufferDescription_.target, 0);
-            Reset();
             throw std::runtime_error("Unable to establish persistent GPU buffer mapping");
         }
     }

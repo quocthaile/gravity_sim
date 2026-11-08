@@ -23,13 +23,13 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 
 ```mermaid
 flowchart LR
-    A["Xử lý input"] --> B["RunObjectStateSync"]
+    A["Xử lý input / CPU N-body"] --> B["RunObjectStateSync"]
     B --> C["RunGpuStateTransition"]
     C --> D["RunGridCompute"]
     D --> E["DrawGrid / DrawObjects"]
 ```
 
-`RunObjectStateSync` phải chạy **trước** `RunGpuStateTransition`, để builder octree, force, collision và integration đọc cùng snapshot với số lượng object hiện tại. Pipeline chi tiết nằm trong [mass_aggregation.md](mass_aggregation.md).
+`RunObjectStateSync` phải chạy **trước** `RunGpuStateTransition`, để các compute shader (`nbody.comp`, `integrate.comp`) và vertex shader luôn đọc dữ liệu object mới nhất, đúng với số lượng object hiện tại.
 
 ## Các bước thực hiện
 
@@ -72,13 +72,15 @@ Chỉ chạy khi object cuối đang `initializing`:
 ```cpp
 while (!glfwWindowShouldClose(window) && running)
 {
-    RunObjectStateSync(window, objectCount);
-    RunGpuStateTransition(shaderPrograms, computeUniformLocations, objectCount, epsilon, theta,
-                          pause, dt);
-    RunGridCompute(shaderPrograms.gridCompute, computeUniformLocations, objectCount);
+    // ... input, CPU N-body ...
 
-    DrawGrid(shaderPrograms.gridRendering, gridVAO, gridIndexCount, uniformLocations);
-    DrawObjects(shaderPrograms.objectRendering, objs);
+    RunObjectStateSync(window, objectCount);
+    RunGpuStateTransition(nbodyShaderProgram, integrateShaderProgram, computeUniformLocations,
+                          objectCount, epsilon, pause, dt);
+    RunGridCompute(computeShaderProgram, objectCount);
+
+    DrawGrid(renderingShaderProgram, gridVAO, gridIndexCount, objectColorLoc);
+    DrawObjects(objectRenderingShaderProgram, objs);
     // ...
 }
 ```

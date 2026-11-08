@@ -1,9 +1,5 @@
 # Sơ đồ hệ thống gravity_sim hiện tại
 
-> Lưu trữ theo trạng thái ngày 28/10/2026, trước octree. Các sơ đồ về
-> force, binding 6–9, dispatch và validation bên dưới không còn mô tả runtime
-> hiện tại; xem [mass_aggregation.md](mass_aggregation.md) cho pipeline mới.
-
 Tài liệu đối chiếu trực tiếp mã nguồn ngày **28/10/2026**, tại HEAD `1f873a6`. Phần chính mô tả executable `gravity_sim_3Dgrid`; phụ lục liệt kê cả baseline, validation, công cụ sai số và legacy. Các sơ đồ biểu diễn **mã đã triển khai**, các role/shader chưa nối vào runtime được ghi riêng.
 
 Phạm vi kiểm kê: 23 định nghĩa struct/class C++ do dự án khai báo, 4 enum class và 6 tên struct GLSL khác nhau. Không tính kiểu của thư viện GLM, STL, GLFW/OpenGL; khai báo trước `class Object;` không phải một định nghĩa mới.
@@ -58,7 +54,7 @@ flowchart TD
     PRG --> U["InitializeComputeUniformLocations()<br/>InitializeGridRenderingUniforms()<br/>InitializeObjectRenderingUniforms()"]
     U --> SPH["CreateUnitSphere()<br/>mesh dùng chung 600 vertices"]
     SPH --> GRID["CreateBaseGridGPU()<br/>CreateGridIndices(200)"]
-    GRID --> ALLOC["ComputePipeline(gridVertices)<br/>tạo/bind 10 buffers; map 8 object buffers"]
+    GRID --> ALLOC["ComputePipeline(gridVertices)<br/>tạo/bind 15 buffers; map 8 object buffers"]
     ALLOC --> MAT["objectGpuState(0, objectCount)<br/>materialize toàn bộ object ban đầu"]
     MAT --> VAO["InitializeGridRenderingResources()<br/>VAO đọc trực tiếp DeformedGrid; tạo EBO"]
     VAO --> INIT["captureGpuTrajectorySample()<br/>lưu mẫu CurrentState ban đầu"]
@@ -85,7 +81,7 @@ Các hàm khởi tạo chính:
 | `InitializeComputeUniformLocations()` | Cache location của 8 compute uniform; ném exception nếu uniform bắt buộc không tìm thấy. |
 | `CreateUnitSphere()` | `SphericalToCartesian()` → `CreateMeshBuffers()`; 10 stacks × 10 sectors × 6 vertices, một VAO/VBO dùng chung. |
 | `CreateBaseGridGPU()` | `CreateGridVertices(gridSize, gridDivisions)` → đổi mỗi xyz thành `vec4(x,y,z,1)`. Lưới nằm trên mặt phẳng XZ, baseY = -800. |
-| `ComputePipeline()` | Kiểm tra có binding 15, tính capacity, tạo 8 object buffers và BaseGrid/DeformedGrid; upload BaseGrid. Hàm này thiết lập bộ nhớ, chưa dispatch shader. |
+| `ComputePipeline()` | Kiểm tra binding 15 và giới hạn SSBO, tính object/node capacity, tạo 8 object buffers, 5 Octree buffers và BaseGrid/DeformedGrid; upload BaseGrid và metadata Uninitialized. Hàm này thiết lập bộ nhớ, chưa dispatch Octree shader. |
 | `objectGpuState(first, end)` | Ghi range `[first,end)` vào các buffer; set `gpuStateIndex`, khởi tạo cả Current/Next, zero acceleration/collision, cập nhật logical count. |
 | `InitializeGridRenderingResources()` | Gắn DeformedGrid làm vertex source location 0 của grid VAO và upload các chỉ số đường lưới vào EBO. |
 | `Cleanup()` | Hủy sphere, grid VAO/EBO, `gpuMemoryManager.Shutdown()`, xóa 5 program, xóa objects/counters và `glfwTerminate()`. |
@@ -203,12 +199,12 @@ Trong bảng: R/W là đọc/ghi từ phía shader. `CpuAccess` chỉ cấu hìn
 | 3 | `ObjectControl` | `GpuObjectControl`, 16 B | Write | nbody, integrate | CPU: flags/id |
 | 4 | `BaseGrid` | `glm::vec4`, 16 B | None | grid.comp | CPU upload một lần bằng buffer API |
 | 5 | `DeformedGrid` | `glm::vec4`, 16 B | None | Vertex fetch qua grid VAO, không qua SSBO trong grid.vert | grid.comp |
-| 6 | `MassField` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
-| 7 | `BlurFieldA` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
-| 8 | `BlurFieldB` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
+| 6 | `MassField` | `GpuMassAggregate`, 16 B | None | Chưa có shader consumer | GPU sẽ ghi COM + mass |
+| 7 | `OctreeNodes` | `GpuOctreeNode`, 64 B | None | Chưa có shader consumer | GPU sẽ ghi topology/bounds |
+| 8 | `ObjectIndexList` | `uint32_t`, 4 B | None | Chưa có shader consumer | GPU sẽ ghi object slot theo leaf |
 | 9 | `AccelerationField` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
-| 10 | `LODMetadata` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
-| 11 | `Metrics` | Chưa định nghĩa phần tử / chưa allocate | — | Chưa dùng | Role dự phòng |
+| 10 | `OctreeMetadata` | `GpuOctreeMetadata`, 64 B | None | Chưa có shader consumer | CPU khởi tạo Uninitialized; GPU sẽ ghi trạng thái/counters |
+| 11 | `ObjectLeafIndex` | `uint32_t`, 4 B | None | Chưa có shader consumer | GPU sẽ ghi object slot tới leaf |
 | 12 | `ObjectDerived` | `GpuObjectDerived`, 16 B | Write | nbody, grid.comp, objects.vert | CPU: radius/rs |
 | 13 | `ObjectAcceleration` | `GpuObjectAcceleration`, 16 B | Read | integrate; CPU tại validation | nbody; zero ban đầu qua buffer API |
 | 14 | `ObjectRender` | `GpuObjectRender`, 16 B | Write | objects.vert | CPU: color |
@@ -223,7 +219,7 @@ Trong bảng: R/W là đọc/ghi từ phía shader. `CpuAccess` chỉ cấu hìn
 5. `DrawObjects()` bind lại CurrentState, ObjectDerived và ObjectRender trước draw.
 6. `InitializeGridRenderingResources()` bind DeformedGrid bằng `GL_ARRAY_BUFFER` để lưu vertex source trong VAO: location 0, xyz là 3 float, stride 16 B, offset 0. Cùng handle vừa là SSBO output của compute vừa là vertex source; không copy grid từ GPU qua CPU hay sang VBO trung gian.
 
-Tổng tám object buffers là **148 B/capacity slot**, gồm hai state buffers. BaseGrid và DeformedGrid thêm tổng **32 B/grid node**, chưa gồm EBO/sphere/driver overhead. `DeformedGrid` hiện chưa được set logical count, nên `GpuMemoryManager::LogicalBytes()` chưa cộng phần grid này dù buffer đã cấp phát và shader đang sử dụng.
+Tổng tám object buffers là **148 B/capacity slot**, gồm hai state buffers. Ở capacity 256, năm Octree buffers cấp phát thêm **329,872 B**: 4,097 node slots cho MassField và OctreeNodes, hai mảng index có 256 entries và một OctreeMetadata. BaseGrid và DeformedGrid thêm tổng **32 B/grid node**, chưa gồm EBO/sphere/driver overhead. Các Octree buffers đã được cấp phát nhưng chưa có compute consumer; binding 9 vẫn để trống. `DeformedGrid` hiện chưa được set logical count, nên `GpuMemoryManager::LogicalBytes()` chưa cộng phần grid này dù buffer đã cấp phát và shader đang sử dụng.
 
 ## 6. Dispatch, uniforms và thuật toán từng shader
 
@@ -401,7 +397,7 @@ flowchart TD
     RELEASE --> ACTIVE --> PHYS
 ```
 
-`CalculateObjectStateBufferCapacity()` bắt đầu từ 256 và nhân đôi khi cần. `ManageObjectStateBufferCapacity()` resize đồng loạt 8 object buffers; có nhánh giảm một nửa nếu count≤capacity/4 và capacity>256, dù UI hiện chưa có đường xóa object.
+`CalculateObjectStateBufferCapacity()` bắt đầu từ 256 và nhân đôi khi cần. `ManageObjectStateBufferCapacity()` resize đồng loạt 8 object buffers, hai object-index buffers, OctreeNodes và MassField; node capacity là `1 + objectCapacity * 16`. Có nhánh giảm một nửa nếu count≤capacity/4 và capacity>256, dù UI hiện chưa có đường xóa object. Mọi buffer size của Octree được kiểm tra với `GL_MAX_SHADER_STORAGE_BLOCK_SIZE` trước resize; sau resize, index/node logical counts được reset và OctreeMetadata trở về Uninitialized.
 
 `GpuBuffer::Resize()` cấp buffer immutable thay thế bằng `glBufferStorage`, copy `min(oldLogicalCount,newCapacity)*elementSize` bằng `glCopyBufferSubData`, chuyển ownership rồi bind lại role. Giữ dữ liệu GPU cũ, không dựng lại vị trí/velocity đang chạy từ CPU Object.
 
@@ -597,7 +593,7 @@ Tất cả nằm trong `include/gpu_memory_manager.hpp`, underlying type `std::u
 
 | Enum | Các giá trị | Cách dùng hiện tại |
 |---|---|---|
-| `BufferRole:8` | `CurrentState, NextState, ObjectPhysical, ObjectControl, BaseGrid, DeformedGrid, MassField, BlurFieldA, BlurFieldB, AccelerationField, LODMetadata, Metrics, ObjectDerived, ObjectAcceleration, ObjectRender, ObjectCollision` | Khóa map manager và ánh xạ binding 0…15; 6 role giữa chưa được allocate. |
+| `BufferRole:8` | `CurrentState, NextState, ObjectPhysical, ObjectControl, BaseGrid, DeformedGrid, MassField, OctreeNodes, ObjectIndexList, AccelerationField, OctreeMetadata, ObjectLeafIndex, ObjectDerived, ObjectAcceleration, ObjectRender, ObjectCollision` | Khóa map manager và ánh xạ binding 0…15; Octree roles ở 6-8, 10-11 đã allocate, binding 9 chưa allocate. |
 | `GpuStorageMode:28` | `GpuResident` | Mode duy nhất được hỗ trợ. Tên policy không phải phép đo vị trí VRAM vật lý của driver. |
 | `CpuAccess:33` | `None, Read, Write, ReadWrite` | Quyết định map flags READ/WRITE. |
 | `MappingMode:41` | `None, Persistent, PersistentCoherent` | Runtime chọn None cho grid và PersistentCoherent cho object buffers. |
@@ -681,7 +677,7 @@ Baseline cập nhật state CPU trong vòng lặp object; đây là executable �
 | Cell ID | Mới ghi `uint(cellcoord.x)`; `u_gridX/u_gridY` chưa dùng để tuyến tính hóa tọa độ 3D. |
 | Liên quan C++ | `CreateObjectCellID()` ở cuối function.cpp và lời gọi trong main đều bị comment. Globals `CEll_SIZE,worldMin,worldMax,objectCellID` còn dấu vết cho hướng mass aggregation. |
 
-Binding 6 của bản nháp là `ObjectCellID`, trong khi manager dành binding 6 cho role `MassField`; hai tên này chưa được thống nhất thành pipeline đang hoạt động. Mass accumulation, Gaussian blur, acceleration field, LOD và GPU metrics buffer chưa có chuỗi dispatch triển khai. Không vẽ các bước đó như một phần solver hiện tại.
+Binding 6 trong shader bản nháp là `ObjectCellID`, không khớp với role `MassField` hiện đã được manager allocate; shader đó vẫn không được load hoặc dispatch. Các buffer Octree/MassField mới chỉ được cấp phát, chưa có chuỗi dispatch xây cây/aggregation. Gaussian blur, acceleration field, LOD và GPU metrics cũng chưa được triển khai. Không vẽ các bước đó như một phần solver hiện tại.
 
 ## 14. Bản đồ mã nguồn để tra cứu
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -54,6 +55,67 @@ struct ObjectMesh
 };
 
 ObjectMesh objectMesh;
+
+namespace
+{
+void ValidateOctreeStorageCapacity(std::size_t objectCapacity, std::size_t nodeCapacity)
+{
+    GLint64 maxStorageBlockSize = 0;
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &maxStorageBlockSize);
+    if (maxStorageBlockSize <= 0)
+    {
+        throw std::runtime_error("OpenGL reported an invalid maximum SSBO block size");
+    }
+
+    const auto validateBuffer = [maxStorageBlockSize](const char *name, std::size_t elementSize,
+                                                       std::size_t capacity)
+    {
+        if (elementSize == 0 ||
+            capacity > std::numeric_limits<std::size_t>::max() / elementSize)
+        {
+            throw std::length_error(std::string(name) + " capacity overflows addressable memory");
+        }
+        const std::size_t byteSize = capacity * elementSize;
+        if (byteSize > static_cast<std::uint64_t>(maxStorageBlockSize) ||
+            byteSize > static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()))
+        {
+            throw std::length_error(std::string(name) +
+                                    " exceeds the OpenGL shader storage block limit");
+        }
+    };
+
+    validateBuffer("MassField", sizeof(GpuMassAggregate), nodeCapacity);
+    validateBuffer("OctreeNodes", sizeof(GpuOctreeNode), nodeCapacity);
+    validateBuffer("ObjectIndexList", sizeof(GpuObjectIndex), objectCapacity);
+    validateBuffer("ObjectLeafIndex", sizeof(GpuObjectIndex), objectCapacity);
+    validateBuffer("OctreeMetadata", sizeof(GpuOctreeMetadata), 1);
+}
+
+void ResetOctreeMetadata()
+{
+    const GpuOctreeMetadata metadata =
+        MakeUninitializedOctreeMetadata(gpuMemoryManager.Get(BufferRole::OctreeNodes).Capacity());
+    gpuMemoryManager.Upload(BufferRole::OctreeMetadata, &metadata, sizeof(metadata), 1);
+}
+
+void ValidateOctreeBindings()
+{
+    constexpr BufferRole octreeRoles[] = {
+        BufferRole::MassField,       BufferRole::OctreeNodes,     BufferRole::ObjectIndexList,
+        BufferRole::OctreeMetadata,  BufferRole::ObjectLeafIndex,
+    };
+
+    for (const BufferRole role : octreeRoles)
+    {
+        GLint boundBuffer = 0;
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, BindingFor(role), &boundBuffer);
+        if (boundBuffer != static_cast<GLint>(gpuMemoryManager.Get(role).Handle()))
+        {
+            throw std::runtime_error("Octree SSBO is not bound to its assigned binding point");
+        }
+    }
+}
+} // namespace
 
 // Tolerances for float comparison: absolute for values near zero, relative for large magnitudes
 // (e.g. mass ~1e22) where a fixed absolute epsilon would be meaningless.
@@ -106,9 +168,7 @@ void CreateShaderProgram(ShaderPrograms &shaderPrograms)
     shaderPrograms.objectRendering =
         CreateGraphicsProgram("shaders/objects.vert", "shaders/objects.frag");
     shaderPrograms.gridCompute = CreateComputeProgram("shaders/grid.comp");
-    shaderPrograms.treeCompute = CreateComputeProgram("shaders/build_octree.comp");
     shaderPrograms.nbodyCompute = CreateComputeProgram("shaders/nbody.comp");
-    shaderPrograms.collisionCompute = CreateComputeProgram("shaders/collision.comp");
     shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
 }
 
@@ -127,20 +187,11 @@ void InitializeComputeUniformLocations(const ShaderPrograms &programs,
         return location;
     };
 
-    locations.treeObjectCount =
-        getRequiredLocation(programs.treeCompute, "treeCompute", "u_objectCount");
-    locations.treeNodeCapacity =
-        getRequiredLocation(programs.treeCompute, "treeCompute", "u_nodeCapacity");
-    locations.treePass = getRequiredLocation(programs.treeCompute, "treeCompute", "u_pass");
-    locations.treeDepth = getRequiredLocation(programs.treeCompute, "treeCompute", "u_depth");
     locations.nbodyObjectCount =
         getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_objectCount");
     locations.nbodyGravitationalConstant = getRequiredLocation(
         programs.nbodyCompute, "nbodyCompute", "u_gravitationalConstant");
     locations.nbodyEpsilon = getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_epsilon");
-    locations.nbodyTheta = getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_theta");
-    locations.collisionObjectCount =
-        getRequiredLocation(programs.collisionCompute, "collisionCompute", "u_objectCount");
 
     locations.integrateObjectCount =
         getRequiredLocation(programs.integrateCompute, "integrateCompute", "u_objectCount");
@@ -477,33 +528,6 @@ size_t CalculateObjectStateBufferCapacity(size_t requiredCount)
     return capacity;
 }
 
-constexpr size_t kTreeDepth = 8;
-
-size_t ValidateTreeCapacity(size_t objectCapacity)
-{
-    if (objectCapacity > (std::numeric_limits<GLuint>::max() - 1u) / kTreeDepth)
-    {
-        throw std::length_error("Octree node capacity exceeds the 32-bit index range");
-    }
-    const size_t nodeCapacity = 1 + objectCapacity * kTreeDepth;
-    GLint64 maxBlockSize = 0;
-    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &maxBlockSize);
-    if (maxBlockSize <= 0 ||
-        nodeCapacity > static_cast<size_t>(maxBlockSize) / sizeof(GpuTreeNode) ||
-        nodeCapacity > static_cast<size_t>(maxBlockSize) / sizeof(glm::vec4) ||
-        objectCapacity > static_cast<size_t>(maxBlockSize) / sizeof(glm::uvec2))
-    {
-        throw std::length_error("Octree capacity exceeds GL_MAX_SHADER_STORAGE_BLOCK_SIZE");
-    }
-    GLint maxGroups = 0;
-    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &maxGroups);
-    if (maxGroups <= 0 || (nodeCapacity + 63) / 64 > static_cast<size_t>(maxGroups))
-    {
-        throw std::length_error("Object capacity exceeds compute dispatch limits");
-    }
-    return nodeCapacity;
-}
-
 void ManageObjectStateBufferCapacity(size_t objectCount)
 {
     constexpr size_t kMinimumObjectStateCapacity = 256;
@@ -528,7 +552,8 @@ void ManageObjectStateBufferCapacity(size_t objectCount)
         return;
     }
 
-    const size_t nodeCapacity = ValidateTreeCapacity(newCapacity);
+    const size_t newNodeCapacity = CalculateOctreeNodeBufferCapacity(newCapacity);
+    ValidateOctreeStorageCapacity(newCapacity, newNodeCapacity);
     gpuMemoryManager.WaitForGpuCompletion();
     gpuMemoryManager.Resize(BufferRole::CurrentState, newCapacity);
     gpuMemoryManager.Resize(BufferRole::NextState, newCapacity);
@@ -538,9 +563,17 @@ void ManageObjectStateBufferCapacity(size_t objectCount)
     gpuMemoryManager.Resize(BufferRole::ObjectAcceleration, newCapacity);
     gpuMemoryManager.Resize(BufferRole::ObjectRender, newCapacity);
     gpuMemoryManager.Resize(BufferRole::ObjectCollision, newCapacity);
-    gpuMemoryManager.Resize(BufferRole::NodeAggregate, nodeCapacity);
-    gpuMemoryManager.Resize(BufferRole::TreeTopology, nodeCapacity);
-    gpuMemoryManager.Resize(BufferRole::TreeObjectIndex, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectIndexList, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::ObjectLeafIndex, newCapacity);
+    gpuMemoryManager.Resize(BufferRole::OctreeNodes, newNodeCapacity);
+    gpuMemoryManager.Resize(BufferRole::MassField, newNodeCapacity);
+
+    gpuMemoryManager.Get(BufferRole::ObjectIndexList).SetLogicalCount(0);
+    gpuMemoryManager.Get(BufferRole::ObjectLeafIndex).SetLogicalCount(0);
+    gpuMemoryManager.Get(BufferRole::OctreeNodes).SetLogicalCount(0);
+    gpuMemoryManager.Get(BufferRole::MassField).SetLogicalCount(0);
+    ResetOctreeMetadata();
+    ValidateOctreeBindings();
 
     objectStateCapacity = newCapacity;
 }
@@ -733,40 +766,14 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
     {
         throw std::runtime_error("OpenGL does not provide SSBO binding 15 for ObjectCollision");
     }
-    GLint maxComputeStorageBlocks = 0;
-    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &maxComputeStorageBlocks);
-    if (maxComputeStorageBlocks < 8)
-    {
-        throw std::runtime_error("Octree traversal requires eight compute shader storage blocks");
-    }
-    GLint maxInvocations = 0;
-    GLint maxGroupSizeX = 0;
-    glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &maxInvocations);
-    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0, &maxGroupSizeX);
-    if (maxInvocations < 64 || maxGroupSizeX < 64)
-    {
-        throw std::runtime_error("Octree compute shaders require a workgroup size of 64");
-    }
 
     objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
     if (objectStateCapacity == 0)
     {
         objectStateCapacity = 256;
     }
-    const size_t nodeCapacity = ValidateTreeCapacity(objectStateCapacity);
-
-    gpuMemoryManager.Create({BufferRole::NodeAggregate, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::vec4), nodeCapacity});
-    gpuMemoryManager.Create({BufferRole::TreeTopology, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(GpuTreeNode), nodeCapacity});
-    gpuMemoryManager.Create({BufferRole::TreeObjectIndex, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::uvec2), objectStateCapacity});
-    gpuMemoryManager.Create({BufferRole::TreeMetadata, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
-                             sizeof(glm::uvec4), 1});
+    const size_t octreeNodeCapacity = CalculateOctreeNodeBufferCapacity(objectStateCapacity);
+    ValidateOctreeStorageCapacity(objectStateCapacity, octreeNodeCapacity);
 
     gpuMemoryManager.Create({BufferRole::CurrentState, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
@@ -800,6 +807,23 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
                              GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectCollision),
                              objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::MassField, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuMassAggregate), octreeNodeCapacity});
+    gpuMemoryManager.Create({BufferRole::OctreeNodes, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuOctreeNode), octreeNodeCapacity});
+    gpuMemoryManager.Create({BufferRole::ObjectIndexList, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuObjectIndex), objectStateCapacity});
+    gpuMemoryManager.Create({BufferRole::OctreeMetadata, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuOctreeMetadata), 1});
+    gpuMemoryManager.Create({BufferRole::ObjectLeafIndex, GL_SHADER_STORAGE_BUFFER,
+                             GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
+                             sizeof(GpuObjectIndex), objectStateCapacity});
+    ResetOctreeMetadata();
+    ValidateOctreeBindings();
     gpuMemoryManager.Create({BufferRole::BaseGrid, GL_SHADER_STORAGE_BUFFER,
                              GpuStorageMode::GpuResident, CpuAccess::None, MappingMode::None,
                              sizeof(glm::vec4), gridVertices.size()});
@@ -811,16 +835,11 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
 }
 
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                     size_t objectCount, float epsilon, float theta)
+                     size_t objectCount, float epsilon)
 {
     if (objectCount == 0)
     {
         return;
-    }
-
-    if (!std::isfinite(theta) || theta < 0.0f)
-    {
-        throw std::invalid_argument("Barnes-Hut theta must be finite and non-negative");
     }
 
     constexpr GLuint localSizeX = 64;
@@ -831,7 +850,6 @@ void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations 
     glUniform1ui(locations.nbodyObjectCount, static_cast<GLuint>(objectCount));
     glUniform1d(locations.nbodyGravitationalConstant, kGravitationalConstant);
     glUniform1f(locations.nbodyEpsilon, epsilon);
-    glUniform1f(locations.nbodyTheta, theta);
 
     glDispatchCompute(groupCountX, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -883,9 +901,9 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount)
     }
 }
 
-void RunGpuStateTransition(const ShaderPrograms &programs, const ComputeUniformLocations &locations,
-                           size_t objectCount, float epsilon, float theta, bool paused,
-                           double timeStep)
+void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
+                           const ComputeUniformLocations &locations, size_t objectCount,
+                           float epsilon, bool paused, double timeStep)
 {
     if (objectCount == 0)
     {
@@ -894,63 +912,10 @@ void RunGpuStateTransition(const ShaderPrograms &programs, const ComputeUniformL
 
     // Ensure that any CPU writes to persistently mapped buffers are visible to the GPU before running
     glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
-    glUseProgram(programs.treeCompute);
-    glUniform1ui(locations.treeObjectCount, static_cast<GLuint>(objectCount));
-    glUniform1ui(locations.treeNodeCapacity,
-                 static_cast<GLuint>(gpuMemoryManager.Get(BufferRole::TreeTopology).Capacity()));
-    const GLuint nodeGroups = static_cast<GLuint>(
-        (gpuMemoryManager.Get(BufferRole::TreeTopology).Capacity() + 63) / 64);
-    const GLuint objectGroups = static_cast<GLuint>((objectCount + 63) / 64);
-    const auto treePass = [&](GLuint pass, GLuint depth, GLuint groups)
-    {
-        glUniform1ui(locations.treePass, pass);
-        glUniform1ui(locations.treeDepth, depth);
-        glDispatchCompute(groups, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    };
-    treePass(0, 0, 1);
-    for (GLuint depth = 0; depth < kTreeDepth; ++depth)
-    {
-        treePass(1, depth, objectGroups);
-        treePass(2, depth, nodeGroups);
-    }
-    treePass(3, 0, objectGroups);
-    for (GLuint depth = static_cast<GLuint>(kTreeDepth + 1); depth > 0; --depth)
-        treePass(4, depth - 1, nodeGroups);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
-    glm::uvec4 metadata(0);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, gpuMemoryManager.Get(BufferRole::TreeMetadata).Handle());
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(metadata), &metadata);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    const GLenum buildError = glGetError();
-    if (buildError != GL_NO_ERROR)
-    {
-        throw std::runtime_error("OpenGL error while building or reading octree status: " +
-                                 std::to_string(buildError));
-    }
-    if (metadata.y != 0)
-    {
-        throw std::runtime_error("GPU octree build failed with status " +
-                                 std::to_string(metadata.y) + "; simulation state not advanced");
-    }
-    if (metadata.x == 0 ||
-        metadata.x > gpuMemoryManager.Get(BufferRole::TreeTopology).Capacity())
-    {
-        throw std::runtime_error("GPU octree returned an invalid node count; state not advanced");
-    }
-
-    RunNBodyCompute(programs.nbodyCompute, locations, objectCount, epsilon, theta);
-    glUseProgram(programs.collisionCompute);
-    glUniform1ui(locations.collisionObjectCount, static_cast<GLuint>(objectCount));
-    glDispatchCompute(static_cast<GLuint>((objectCount + 63) / 64), 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    RunIntegration(programs.integrateCompute, locations, objectCount, paused, timeStep);
-    const GLenum transitionError = glGetError();
-    if (transitionError != GL_NO_ERROR)
-    {
-        throw std::runtime_error("OpenGL error during force, collision or integration: " +
-                                 std::to_string(transitionError) + "; state not advanced");
-    }
+    // Run the N-body compute shader to calculate accelerations based on current positions and masses.
+    RunNBodyCompute(nbodyShaderProgram, locations, objectCount, epsilon);
+    // Run the integration compute shader
+    RunIntegration(integrateShaderProgram, locations, objectCount, paused, timeStep);
     // Ping-pong the current and next state buffers for the next frame's computations.
     gpuMemoryManager.SwapCurrentNext();
 
@@ -1013,9 +978,7 @@ void Cleanup(const ShaderPrograms &shaderPrograms)
     glDeleteProgram(shaderPrograms.gridRendering);
     glDeleteProgram(shaderPrograms.gridCompute);
     glDeleteProgram(shaderPrograms.objectRendering);
-    glDeleteProgram(shaderPrograms.treeCompute);
     glDeleteProgram(shaderPrograms.nbodyCompute);
-    glDeleteProgram(shaderPrograms.collisionCompute);
     glDeleteProgram(shaderPrograms.integrateCompute);
 
     objs.clear();

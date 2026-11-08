@@ -38,8 +38,6 @@ double dt = 1.0 / 96.0;
 
 namespace
 {
-GLuint treeValidationProgram = 0;
-GLuint collisionValidationProgram = 0;
 struct ReferenceObject
 {
     std::uint32_t id;
@@ -101,12 +99,8 @@ void RunCountedTransition(GLuint nbodyProgram, GLuint integrateProgram,
                           const ComputeUniformLocations &locations, size_t objectCount,
                           float epsilon, bool paused, size_t &transitionCount)
 {
-    ShaderPrograms programs;
-    programs.treeCompute = treeValidationProgram;
-    programs.nbodyCompute = nbodyProgram;
-    programs.collisionCompute = collisionValidationProgram;
-    programs.integrateCompute = integrateProgram;
-    RunGpuStateTransition(programs, locations, objectCount, epsilon, 0.0f, paused, dt);
+    RunGpuStateTransition(nbodyProgram, integrateProgram, locations, objectCount, epsilon, paused,
+                          dt);
     ++transitionCount;
 }
 
@@ -425,8 +419,6 @@ void ShutdownValidation(GLFWwindow *window, GLuint renderingProgram, GLuint nbod
     glDeleteProgram(nbodyProgram);
     glDeleteProgram(integrateProgram);
     glDeleteProgram(gridComputeProgram);
-    glDeleteProgram(treeValidationProgram);
-    glDeleteProgram(collisionValidationProgram);
     if (window != nullptr)
     {
         glfwDestroyWindow(window);
@@ -526,14 +518,10 @@ int main()
         Require(invalidStateRejected, "DrawObjects accepted an out-of-range GPU state slot");
         DrawObjects(renderingProgram, {});
         nbodyProgram = CreateComputeProgram("shaders/nbody.comp");
-        treeValidationProgram = CreateComputeProgram("shaders/build_octree.comp");
-        collisionValidationProgram = CreateComputeProgram("shaders/collision.comp");
         integrateProgram = CreateComputeProgram("shaders/integrate.comp");
         gridComputeProgram = CreateComputeProgram("shaders/grid.comp");
         ShaderPrograms computePrograms;
-        computePrograms.treeCompute = treeValidationProgram;
         computePrograms.nbodyCompute = nbodyProgram;
-        computePrograms.collisionCompute = collisionValidationProgram;
         computePrograms.integrateCompute = integrateProgram;
         computePrograms.gridCompute = gridComputeProgram;
         InitializeComputeUniformLocations(computePrograms, computeUniformLocations);
@@ -543,7 +531,8 @@ int main()
             gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
         const GLuint nextHandleBeforeZeroDispatch =
             gpuMemoryManager.Get(BufferRole::NextState).Handle();
-        RunGpuStateTransition(computePrograms, computeUniformLocations, 0, epsilon, 0.0f, false, dt);
+        RunGpuStateTransition(nbodyProgram, integrateProgram, computeUniformLocations, 0, epsilon,
+                              false, dt);
         Require(gpuMemoryManager.Get(BufferRole::CurrentState).Handle() ==
                         currentHandleBeforeZeroDispatch &&
                     gpuMemoryManager.Get(BufferRole::NextState).Handle() ==
@@ -837,12 +826,7 @@ int main()
         }
         Require(objs.size() > capacityBeforeGrowth,
                 "Capacity-growth scenario did not exceed the old capacity");
-        const auto resizeStart = std::chrono::steady_clock::now();
         SynchronizeObjectStateBuffers(objectCount, objs.size());
-        const auto resizeEnd = std::chrono::steady_clock::now();
-        std::cout << "256-to-512 object/tree resize and materialization: "
-                  << std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count()
-                  << " ms" << std::endl;
         Require(capacityBeforeGrowth == 256 && objectStateCapacity == 512,
                 "Object state buffers did not grow from 256 to 512 slots");
         ValidateObjectBufferLayout(objectCount);
@@ -913,43 +897,6 @@ int main()
         ValidateInstancedRendering(renderingProgram, validationFramebuffer, referenceState, 1,
                                    renderMetrics);
         ValidateGpuState(referenceState, growthAccelerations, transitionCount, validationMetrics);
-
-        gpuMemoryManager.WaitForGpuCompletion();
-        auto *stateForFailure =
-            gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
-        const glm::vec4 savedPosition = stateForFailure[0].position;
-        const GLuint currentBeforeFailure = gpuMemoryManager.Get(BufferRole::CurrentState).Handle();
-        const GLuint nextBeforeFailure = gpuMemoryManager.Get(BufferRole::NextState).Handle();
-        bool rejectedInvalidTheta = false;
-        try
-        {
-            RunGpuStateTransition(computePrograms, computeUniformLocations, objectCount, epsilon,
-                                  std::numeric_limits<float>::quiet_NaN(), false, dt);
-        }
-        catch (const std::invalid_argument &)
-        {
-            rejectedInvalidTheta = true;
-        }
-        Require(rejectedInvalidTheta &&
-                    gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == currentBeforeFailure &&
-                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == nextBeforeFailure,
-                "Invalid theta did not prevent the state swap");
-        stateForFailure[0].position.x = std::numeric_limits<float>::quiet_NaN();
-        bool rejectedInvalidTree = false;
-        try
-        {
-            RunGpuStateTransition(computePrograms, computeUniformLocations, objectCount, epsilon,
-                                  0.0f, false, dt);
-        }
-        catch (const std::runtime_error &)
-        {
-            rejectedInvalidTree = true;
-        }
-        Require(rejectedInvalidTree &&
-                    gpuMemoryManager.Get(BufferRole::CurrentState).Handle() == currentBeforeFailure &&
-                    gpuMemoryManager.Get(BufferRole::NextState).Handle() == nextBeforeFailure,
-                "Invalid tree did not prevent the state swap");
-        stateForFailure[0].position = savedPosition;
 
         const double averageWaitMicroseconds =
             std::chrono::duration<double, std::micro>(totalFenceWait).count() / timingSamples;
