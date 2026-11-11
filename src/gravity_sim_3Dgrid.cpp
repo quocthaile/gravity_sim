@@ -145,6 +145,8 @@ int main()
         UpdateCamera(shaderPrograms, uniformLocations, cameraPos);
 
         RunObjectStateSync(window, objectCount);
+        RunOctreeConstruction(shaderPrograms.boundingBoxCompute, shaderPrograms.octreeBuildCompute,
+                              computeUniformLocations, objectCount);
         RunGpuStateTransition(shaderPrograms.nbodyCompute, shaderPrograms.integrateCompute,
                               computeUniformLocations, objectCount, epsilon, pause, dt);
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)

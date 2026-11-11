@@ -32,6 +32,7 @@ enum class GpuOctreeBuildStatus : std::uint32_t
     Empty,
     Valid,
     NodeCapacityExceeded,
+    ObjectCapacityExceeded,
     InvalidBounds,
 };
 

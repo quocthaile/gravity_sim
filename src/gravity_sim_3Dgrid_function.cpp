@@ -168,6 +168,8 @@ void CreateShaderProgram(ShaderPrograms &shaderPrograms)
     shaderPrograms.objectRendering =
         CreateGraphicsProgram("shaders/objects.vert", "shaders/objects.frag");
     shaderPrograms.gridCompute = CreateComputeProgram("shaders/grid.comp");
+    shaderPrograms.boundingBoxCompute = CreateComputeProgram("shaders/bounding_box.comp");
+    shaderPrograms.octreeBuildCompute = CreateComputeProgram("shaders/build_octree.comp");
     shaderPrograms.nbodyCompute = CreateComputeProgram("shaders/nbody.comp");
     shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
 }
@@ -186,6 +188,15 @@ void InitializeComputeUniformLocations(const ShaderPrograms &programs,
         }
         return location;
     };
+
+    locations.boundingBoxObjectCount =
+        getRequiredLocation(programs.boundingBoxCompute, "boundingBoxCompute", "u_objectCount");
+    locations.boundingBoxObjectCapacity = getRequiredLocation(
+        programs.boundingBoxCompute, "boundingBoxCompute", "u_objectCapacity");
+    locations.octreeBuildObjectCount =
+        getRequiredLocation(programs.octreeBuildCompute, "octreeBuildCompute", "u_objectCount");
+    locations.octreeBuildObjectCapacity = getRequiredLocation(
+        programs.octreeBuildCompute, "octreeBuildCompute", "u_objectCapacity");
 
     locations.nbodyObjectCount =
         getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_objectCount");
@@ -863,6 +874,267 @@ void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations 
     }
 }
 
+#if defined(_DEBUG) || !defined(NDEBUG)
+namespace
+{
+template <typename T>
+std::vector<T> ReadOctreeBuffer(BufferRole role, std::size_t count)
+{
+    const GpuBuffer &buffer = gpuMemoryManager.Get(role);
+    if (count > buffer.Capacity() || count > std::numeric_limits<std::size_t>::max() / sizeof(T))
+    {
+        throw std::runtime_error("Octree debug readback exceeds buffer capacity");
+    }
+
+    std::vector<T> result(count);
+    if (!result.empty())
+    {
+        glBindBuffer(GL_COPY_READ_BUFFER, buffer.Handle());
+        glGetBufferSubData(GL_COPY_READ_BUFFER, 0,
+                           static_cast<GLsizeiptr>(result.size() * sizeof(T)), result.data());
+        glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    }
+    return result;
+}
+
+void ValidateOctreeDebug(std::size_t objectCount)
+{
+    const GpuBuffer &metadataBuffer = gpuMemoryManager.Get(BufferRole::OctreeMetadata);
+    GpuOctreeMetadata metadata{};
+    glBindBuffer(GL_COPY_READ_BUFFER, metadataBuffer.Handle());
+    glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(metadata), &metadata);
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+
+    const auto *controls =
+        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    const auto *states =
+        gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    if (controls == nullptr || states == nullptr)
+    {
+        throw std::runtime_error("Object buffers are unavailable for Octree validation");
+    }
+
+    std::vector<std::uint8_t> activeObjects(objectCount, 0u);
+    std::size_t expectedActiveCount = 0;
+    for (std::size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+    {
+        if (controls[objectIndex].initializing == 0u)
+        {
+            activeObjects[objectIndex] = 1u;
+            ++expectedActiveCount;
+        }
+    }
+
+    const auto status = static_cast<GpuOctreeBuildStatus>(metadata.configuration.w);
+    if (metadata.counts.x != expectedActiveCount)
+    {
+        throw std::runtime_error("Octree active-object count " +
+                                 std::to_string(metadata.counts.x) + " does not match " +
+                                 std::to_string(expectedActiveCount) +
+                                 " active objects in ObjectControl; build status=" +
+                                 std::to_string(metadata.configuration.w) + ", rootMin=(" +
+                                 std::to_string(metadata.rootBoundsMinDiameter.x) + "," +
+                                 std::to_string(metadata.rootBoundsMinDiameter.y) + "," +
+                                 std::to_string(metadata.rootBoundsMinDiameter.z) + "), side=" +
+                                 std::to_string(metadata.rootBoundsMinDiameter.w) + ", rootMax=(" +
+                                 std::to_string(metadata.rootBoundsMax.x) + "," +
+                                 std::to_string(metadata.rootBoundsMax.y) + "," +
+                                 std::to_string(metadata.rootBoundsMax.z) + ")");
+    }
+    if (expectedActiveCount == 0)
+    {
+        if (status != GpuOctreeBuildStatus::Empty || metadata.counts.y != 0u ||
+            metadata.counts.z != 0u || metadata.counts.w != kInvalidOctreeIndex)
+        {
+            throw std::runtime_error("Empty Octree metadata is inconsistent");
+        }
+        return;
+    }
+    if (status != GpuOctreeBuildStatus::Valid || metadata.counts.w != 0u ||
+        metadata.counts.y == 0u || metadata.counts.y > metadata.configuration.z ||
+        metadata.configuration.z !=
+            gpuMemoryManager.Get(BufferRole::OctreeNodes).Capacity())
+    {
+        throw std::runtime_error("GPU Octree construction did not produce a valid tree");
+    }
+
+    const std::size_t nodeCount = metadata.counts.y;
+    const auto nodes = ReadOctreeBuffer<GpuOctreeNode>(BufferRole::OctreeNodes, nodeCount);
+    const auto objectIndices =
+        ReadOctreeBuffer<GpuObjectIndex>(BufferRole::ObjectIndexList, expectedActiveCount);
+    const auto objectLeafIndices =
+        ReadOctreeBuffer<GpuObjectIndex>(BufferRole::ObjectLeafIndex,
+                                         gpuMemoryManager.Get(BufferRole::ObjectLeafIndex)
+                                             .Capacity());
+    std::vector<std::uint8_t> objectOccurrences(objectCount, 0u);
+    std::vector<std::uint8_t> occupiedIndexSlots(expectedActiveCount, 0u);
+    std::size_t leafCount = 0;
+
+    for (std::size_t nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+    {
+        const GpuOctreeNode &node = nodes[nodeIndex];
+        if ((node.links.w & kOctreeNodeFlagOccupied) == 0u ||
+            node.range.z > metadata.configuration.x ||
+            !(node.boundsMinDiameter.w > 0.0f) ||
+            !std::isfinite(node.boundsMinDiameter.w))
+        {
+            throw std::runtime_error("Octree contains an uninitialized or invalid node");
+        }
+
+        if ((node.links.w & kOctreeNodeFlagLeaf) != 0u)
+        {
+            ++leafCount;
+            if (node.links.x != 0u || node.links.y != 0u || node.links.z != 0u ||
+                node.range.x > expectedActiveCount ||
+                node.range.y > expectedActiveCount - node.range.x)
+            {
+                throw std::runtime_error("Octree leaf has invalid child links or object range");
+            }
+            for (std::uint32_t offset = 0; offset < node.range.y; ++offset)
+            {
+                const std::size_t listIndex = node.range.x + offset;
+                const GpuObjectIndex objectIndex = objectIndices[listIndex];
+                if (listIndex >= occupiedIndexSlots.size() ||
+                    occupiedIndexSlots[listIndex] != 0u || objectIndex >= objectCount ||
+                    activeObjects[objectIndex] == 0u ||
+                    objectOccurrences[objectIndex] != 0u ||
+                    objectLeafIndices[objectIndex] != nodeIndex)
+                {
+                    throw std::runtime_error("Octree leaf contains an invalid or duplicate object");
+                }
+                const glm::vec3 position = states[objectIndex].position;
+                const glm::vec3 boundsMin = node.boundsMinDiameter;
+                const glm::vec3 boundsMax = node.boundsMax;
+                const float boundsTolerance =
+                    std::max(node.boundsMinDiameter.w * 1.0e-5f, 1.0e-4f);
+                if (glm::any(glm::lessThan(position, boundsMin - boundsTolerance)) ||
+                    glm::any(glm::greaterThan(position, boundsMax + boundsTolerance)))
+                {
+                    throw std::runtime_error("Octree leaf bounds do not contain their objects");
+                }
+                occupiedIndexSlots[listIndex] = 1u;
+                objectOccurrences[objectIndex] = 1u;
+            }
+            continue;
+        }
+
+        std::uint32_t mask = node.links.z;
+        std::uint32_t maskChildCount = 0u;
+        while (mask != 0u)
+        {
+            maskChildCount += mask & 1u;
+            mask >>= 1u;
+        }
+        if ((node.links.z & 0xFFFFFF00u) != 0u || node.links.y != maskChildCount ||
+            node.links.y == 0u ||
+            node.links.x > nodeCount || node.links.y > nodeCount - node.links.x)
+        {
+            throw std::runtime_error("Octree internal node has invalid child links");
+        }
+
+        std::uint32_t childRank = 0u;
+        for (std::uint32_t octant = 0; octant < kOctreeBranchFactor; ++octant)
+        {
+            if ((node.links.z & (1u << octant)) == 0u)
+            {
+                continue;
+            }
+            const GpuOctreeNode &child = nodes[node.links.x + childRank];
+            if ((child.links.w & kOctreeNodeFlagOccupied) == 0u ||
+                child.range.z != node.range.z + 1u)
+            {
+                throw std::runtime_error("Octree child range is not contiguous or depth is invalid");
+            }
+
+            const float childSide = node.boundsMinDiameter.w * 0.5f;
+            glm::vec3 expectedChildMin = node.boundsMinDiameter;
+            if ((octant & 1u) != 0u)
+            {
+                expectedChildMin.x += childSide;
+            }
+            if ((octant & 2u) != 0u)
+            {
+                expectedChildMin.y += childSide;
+            }
+            if ((octant & 4u) != 0u)
+            {
+                expectedChildMin.z += childSide;
+            }
+            const glm::vec3 childMin = child.boundsMinDiameter;
+            const float boundsTolerance = std::max(childSide * 1.0e-5f, 1.0e-4f);
+            if (std::abs(child.boundsMinDiameter.w - childSide) > boundsTolerance ||
+                glm::any(glm::greaterThan(glm::abs(childMin - expectedChildMin),
+                                          glm::vec3(boundsTolerance))))
+            {
+                throw std::runtime_error("Octree child bounds do not match its octant");
+            }
+            ++childRank;
+        }
+    }
+
+    if (leafCount != metadata.counts.z ||
+        std::find(occupiedIndexSlots.begin(), occupiedIndexSlots.end(), 0u) !=
+            occupiedIndexSlots.end())
+    {
+        throw std::runtime_error("Octree leaf ranges do not cover the active object index list");
+    }
+    for (std::size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+    {
+        if (objectOccurrences[objectIndex] != activeObjects[objectIndex] ||
+            (activeObjects[objectIndex] == 0u &&
+             objectLeafIndices[objectIndex] != kInvalidOctreeIndex))
+        {
+            throw std::runtime_error("Octree lost or duplicated an active object");
+        }
+    }
+}
+} // namespace
+#endif
+
+void RunOctreeConstruction(GLuint boundingBoxShaderProgram, GLuint octreeBuildShaderProgram,
+                           const ComputeUniformLocations &locations, size_t objectCount)
+{
+    const size_t objectCapacity = gpuMemoryManager.Get(BufferRole::CurrentState).Capacity();
+    if (objectCount > objectCapacity ||
+        objectCount > std::numeric_limits<std::uint32_t>::max() ||
+        objectCapacity > std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::length_error("Octree object count exceeds its 32-bit GPU index range");
+    }
+    if (gpuMemoryManager.Get(BufferRole::CurrentState).LogicalCount() < objectCount ||
+        gpuMemoryManager.Get(BufferRole::ObjectControl).LogicalCount() < objectCount)
+    {
+        throw std::runtime_error("Octree input buffers do not contain the requested object range");
+    }
+
+    glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+    glUseProgram(boundingBoxShaderProgram);
+    glUniform1ui(locations.boundingBoxObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1ui(locations.boundingBoxObjectCapacity, static_cast<GLuint>(objectCapacity));
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    glUseProgram(octreeBuildShaderProgram);
+    glUniform1ui(locations.octreeBuildObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1ui(locations.octreeBuildObjectCapacity, static_cast<GLuint>(objectCapacity));
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpuMemoryManager.WaitForGpuCompletion();
+    try
+    {
+        ValidateOctreeDebug(objectCount);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Octree debug validation failed: " << error.what() << std::endl;
+        throw;
+    }
+#endif
+}
+
 void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                     size_t objectCount, bool paused, double timeStep)
 {
@@ -977,6 +1249,8 @@ void Cleanup(const ShaderPrograms &shaderPrograms)
     gpuMemoryManager.Shutdown();
     glDeleteProgram(shaderPrograms.gridRendering);
     glDeleteProgram(shaderPrograms.gridCompute);
+    glDeleteProgram(shaderPrograms.boundingBoxCompute);
+    glDeleteProgram(shaderPrograms.octreeBuildCompute);
     glDeleteProgram(shaderPrograms.objectRendering);
     glDeleteProgram(shaderPrograms.nbodyCompute);
     glDeleteProgram(shaderPrograms.integrateCompute);

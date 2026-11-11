@@ -37,6 +37,8 @@ struct ShaderPrograms
     GLuint gridRendering = 0;
     GLuint gridCompute = 0;
     GLuint objectRendering = 0;
+    GLuint boundingBoxCompute = 0;
+    GLuint octreeBuildCompute = 0;
     GLuint nbodyCompute = 0;
     GLuint integrateCompute = 0;
 };
@@ -53,6 +55,11 @@ struct ShaderUniformLocations
 
 struct ComputeUniformLocations
 {
+    GLint boundingBoxObjectCount = -1;
+    GLint boundingBoxObjectCapacity = -1;
+    GLint octreeBuildObjectCount = -1;
+    GLint octreeBuildObjectCapacity = -1;
+
     GLint nbodyObjectCount = -1;
     GLint nbodyGravitationalConstant = -1;
     GLint nbodyEpsilon = -1;
@@ -88,6 +95,8 @@ std::vector<glm::vec4> CreateBaseGridGPU();
 void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices,
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
+void RunOctreeConstruction(GLuint boundingBoxShaderProgram, GLuint octreeBuildShaderProgram,
+                           const ComputeUniformLocations &locations, size_t objectCount);
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                      size_t objectCount, float epsilon);
 void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,

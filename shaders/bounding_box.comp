@@ -1,0 +1,124 @@
+#version 440 core
+
+layout(local_size_x = 1) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct OctreeMetadata
+{
+    uvec4 counts;
+    uvec4 configuration;
+    vec4 rootBoundsMinDiameter;
+    vec4 rootBoundsMax;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer
+{
+    ObjectState objects[];
+};
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer
+{
+    ObjectControl controls[];
+};
+layout(std430, binding = 10) buffer OctreeMetadataBuffer
+{
+    OctreeMetadata metadata;
+};
+
+uniform uint u_objectCount;
+uniform uint u_objectCapacity;
+
+void SetInvalidBounds()
+{
+    metadata.counts = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
+    metadata.configuration.w = 6u;
+    metadata.rootBoundsMinDiameter = vec4(0.0);
+    metadata.rootBoundsMax = vec4(0.0);
+}
+
+void main()
+{
+    metadata.counts = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
+    metadata.configuration.x = 16u;
+    metadata.configuration.y = 1u;
+    metadata.configuration.w = 1u;
+    metadata.rootBoundsMinDiameter = vec4(0.0);
+    metadata.rootBoundsMax = vec4(0.0);
+
+    if (u_objectCount > u_objectCapacity || metadata.configuration.z == 0u)
+    {
+        metadata.configuration.w = 5u;
+        return;
+    }
+
+    vec3 boundsMin = vec3(3.402823466e+38);
+    vec3 boundsMax = vec3(-3.402823466e+38);
+    uint activeObjectCount = 0u;
+
+    for (uint objectIndex = 0u; objectIndex < u_objectCount; ++objectIndex)
+    {
+        if (controls[objectIndex].initializing != 0u)
+        {
+            continue;
+        }
+
+        vec3 position = objects[objectIndex].position.xyz;
+        if (any(isnan(position)) || any(isinf(position)))
+        {
+            SetInvalidBounds();
+            return;
+        }
+
+        boundsMin = min(boundsMin, position);
+        boundsMax = max(boundsMax, position);
+        ++activeObjectCount;
+    }
+
+    metadata.counts.x = activeObjectCount;
+    if (activeObjectCount == 0u)
+    {
+        metadata.configuration.w = 2u;
+        return;
+    }
+
+    vec3 extent = boundsMax - boundsMin;
+    float longestExtent = max(extent.x, max(extent.y, extent.z));
+    float coordinateScale = max(max(abs(boundsMin.x), abs(boundsMax.x)),
+                                max(max(abs(boundsMin.y), abs(boundsMax.y)),
+                                    max(abs(boundsMin.z), abs(boundsMax.z))));
+    float padding = max(max(longestExtent, coordinateScale) * 1.0e-5, 1.0e-4);
+    float sideLength = longestExtent + 2.0 * padding;
+
+    if (any(isnan(extent)) || any(isinf(extent)) || isnan(sideLength) || isinf(sideLength) ||
+        sideLength <= 0.0)
+    {
+        SetInvalidBounds();
+        return;
+    }
+
+    vec3 rootMin = boundsMin - vec3(padding);
+    vec3 rootMax = rootMin + vec3(sideLength);
+    metadata.rootBoundsMinDiameter = vec4(rootMin, sideLength);
+    metadata.rootBoundsMax = vec4(rootMax, 0.0);
+    if (any(isnan(rootMin)) || any(isinf(rootMin)) || any(isnan(rootMax)) ||
+        any(isinf(rootMax)) || any(greaterThan(rootMin, boundsMin)) ||
+        any(greaterThan(boundsMax, rootMax)))
+    {
+        SetInvalidBounds();
+        return;
+    }
+
+    metadata.configuration.w = 1u;
+}

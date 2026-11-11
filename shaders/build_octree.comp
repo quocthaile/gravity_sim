@@ -1,0 +1,297 @@
+#version 440 core
+
+layout(local_size_x = 1) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct OctreeNode
+{
+    uvec4 links;
+    uvec4 range;
+    vec4 boundsMinDiameter;
+    vec4 boundsMax;
+};
+
+struct OctreeMetadata
+{
+    uvec4 counts;
+    uvec4 configuration;
+    vec4 rootBoundsMinDiameter;
+    vec4 rootBoundsMax;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer
+{
+    ObjectState objects[];
+};
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer
+{
+    ObjectControl controls[];
+};
+layout(std430, binding = 7) buffer OctreeNodesBuffer
+{
+    OctreeNode nodes[];
+};
+layout(std430, binding = 8) buffer ObjectIndexListBuffer
+{
+    uint objectIndices[];
+};
+layout(std430, binding = 10) buffer OctreeMetadataBuffer
+{
+    OctreeMetadata metadata;
+};
+layout(std430, binding = 11) buffer ObjectLeafIndexBuffer
+{
+    uint objectLeafIndices[];
+};
+
+uniform uint u_objectCount;
+uniform uint u_objectCapacity;
+
+uint GetOctant(vec3 position, vec3 nodeMin, float nodeSide)
+{
+    vec3 midpoint = nodeMin + vec3(nodeSide * 0.5);
+    uint octant = 0u;
+    if (position.x >= midpoint.x)
+    {
+        octant |= 1u;
+    }
+    if (position.y >= midpoint.y)
+    {
+        octant |= 2u;
+    }
+    if (position.z >= midpoint.z)
+    {
+        octant |= 4u;
+    }
+    return octant;
+}
+
+void SetBuildFailure(uint status)
+{
+    metadata.counts.y = 0u;
+    metadata.counts.z = 0u;
+    metadata.counts.w = 0xFFFFFFFFu;
+    metadata.configuration.w = status;
+}
+
+void main()
+{
+    if (u_objectCount > u_objectCapacity ||
+        metadata.configuration.w == 5u)
+    {
+        SetBuildFailure(5u);
+        return;
+    }
+
+    for (uint objectIndex = 0u; objectIndex < u_objectCapacity; ++objectIndex)
+    {
+        objectLeafIndices[objectIndex] = 0xFFFFFFFFu;
+    }
+
+    if (metadata.configuration.w == 6u)
+    {
+        return;
+    }
+    if (metadata.configuration.w == 2u)
+    {
+        metadata.counts.y = 0u;
+        metadata.counts.z = 0u;
+        metadata.counts.w = 0xFFFFFFFFu;
+        return;
+    }
+    if (metadata.configuration.w != 1u)
+    {
+        return;
+    }
+
+    uint activeCount = metadata.counts.x;
+    uint nodeCapacity = metadata.configuration.z;
+    if (activeCount == 0u)
+    {
+        SetBuildFailure(6u);
+        return;
+    }
+    if (nodeCapacity == 0u)
+    {
+        SetBuildFailure(4u);
+        return;
+    }
+
+    uint sortedIndex = 0u;
+    for (uint objectIndex = 0u; objectIndex < u_objectCount; ++objectIndex)
+    {
+        if (controls[objectIndex].initializing == 0u)
+        {
+            objectIndices[sortedIndex] = objectIndex;
+            ++sortedIndex;
+        }
+    }
+    if (sortedIndex != activeCount)
+    {
+        SetBuildFailure(6u);
+        return;
+    }
+
+    vec3 rootMin = metadata.rootBoundsMinDiameter.xyz;
+    float rootSide = metadata.rootBoundsMinDiameter.w;
+    if (any(isnan(rootMin)) || any(isinf(rootMin)) || isnan(rootSide) || isinf(rootSide) ||
+        rootSide <= 0.0)
+    {
+        SetBuildFailure(6u);
+        return;
+    }
+
+    nodes[0].links = uvec4(0u, 0u, 0u, 1u);
+    nodes[0].range = uvec4(0u, activeCount, 0u, 0u);
+    nodes[0].boundsMinDiameter = vec4(rootMin, rootSide);
+    nodes[0].boundsMax = vec4(rootMin + vec3(rootSide), 0.0);
+    metadata.counts.y = 1u;
+    metadata.counts.z = 0u;
+    metadata.counts.w = 0u;
+
+    uint nodeIndex = 0u;
+    while (nodeIndex < metadata.counts.y)
+    {
+        OctreeNode node = nodes[nodeIndex];
+        uint objectStart = node.range.x;
+        uint objectCount = node.range.y;
+        uint depth = node.range.z;
+        if (objectCount == 0u || objectStart > activeCount ||
+            objectCount > activeCount - objectStart || depth > metadata.configuration.x)
+        {
+            SetBuildFailure(6u);
+            return;
+        }
+
+        if (objectCount <= metadata.configuration.y || depth >= metadata.configuration.x)
+        {
+            nodes[nodeIndex].links.w = 3u;
+            for (uint offset = 0u; offset < objectCount; ++offset)
+            {
+                uint objectIndex = objectIndices[objectStart + offset];
+                if (objectIndex >= u_objectCount)
+                {
+                    SetBuildFailure(6u);
+                    return;
+                }
+                objectLeafIndices[objectIndex] = nodeIndex;
+            }
+            ++metadata.counts.z;
+            ++nodeIndex;
+            continue;
+        }
+
+        uint octantCounts[8];
+        for (uint octant = 0u; octant < 8u; ++octant)
+        {
+            octantCounts[octant] = 0u;
+        }
+        float nodeSide = node.boundsMinDiameter.w;
+        vec3 nodeMin = node.boundsMinDiameter.xyz;
+        for (uint offset = 0u; offset < objectCount; ++offset)
+        {
+            uint objectIndex = objectIndices[objectStart + offset];
+            uint octant = GetOctant(objects[objectIndex].position.xyz, nodeMin, nodeSide);
+            ++octantCounts[octant];
+        }
+
+        uint childCount = 0u;
+        uint childMask = 0u;
+        for (uint octant = 0u; octant < 8u; ++octant)
+        {
+            if (octantCounts[octant] != 0u)
+            {
+                ++childCount;
+                childMask |= 1u << octant;
+            }
+        }
+        if (childCount == 0u)
+        {
+            SetBuildFailure(6u);
+            return;
+        }
+        if (metadata.counts.y > nodeCapacity || childCount > nodeCapacity - metadata.counts.y)
+        {
+            SetBuildFailure(4u);
+            return;
+        }
+
+        uint childCursor = objectStart;
+        for (uint octant = 0u; octant < 8u; ++octant)
+        {
+            for (uint scanIndex = childCursor; scanIndex < objectStart + objectCount; ++scanIndex)
+            {
+                uint objectIndex = objectIndices[scanIndex];
+                uint objectOctant =
+                    GetOctant(objects[objectIndex].position.xyz, nodeMin, nodeSide);
+                if (objectOctant == octant)
+                {
+                    uint displacedObject = objectIndices[childCursor];
+                    objectIndices[childCursor] = objectIndex;
+                    objectIndices[scanIndex] = displacedObject;
+                    ++childCursor;
+                }
+            }
+        }
+        if (childCursor != objectStart + objectCount)
+        {
+            SetBuildFailure(6u);
+            return;
+        }
+
+        uint firstChildIndex = metadata.counts.y;
+        uint childRank = 0u;
+        uint rangeCursor = objectStart;
+        float childSide = nodeSide * 0.5;
+        for (uint octant = 0u; octant < 8u; ++octant)
+        {
+            uint childObjectCount = octantCounts[octant];
+            if (childObjectCount == 0u)
+            {
+                continue;
+            }
+
+            uint childIndex = firstChildIndex + childRank;
+            vec3 childMin = nodeMin;
+            if ((octant & 1u) != 0u)
+            {
+                childMin.x += childSide;
+            }
+            if ((octant & 2u) != 0u)
+            {
+                childMin.y += childSide;
+            }
+            if ((octant & 4u) != 0u)
+            {
+                childMin.z += childSide;
+            }
+
+            nodes[childIndex].links = uvec4(0u, 0u, 0u, 1u);
+            nodes[childIndex].range = uvec4(rangeCursor, childObjectCount, depth + 1u, 0u);
+            nodes[childIndex].boundsMinDiameter = vec4(childMin, childSide);
+            nodes[childIndex].boundsMax = vec4(childMin + vec3(childSide), 0.0);
+            rangeCursor += childObjectCount;
+            ++childRank;
+        }
+
+        nodes[nodeIndex].links = uvec4(firstChildIndex, childCount, childMask, 1u);
+        nodes[nodeIndex].range = uvec4(0u, 0u, depth, 0u);
+        metadata.counts.y += childCount;
+        ++nodeIndex;
+    }
+
+    metadata.configuration.w = 3u;
+}

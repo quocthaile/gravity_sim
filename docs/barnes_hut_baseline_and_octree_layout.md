@@ -1,8 +1,8 @@
 # Barnes-Hut Baseline and Octree Layout
 
-This note records the repository findings and data contract for the first two
-stages of `KE_HOACH_TICH_HOP_GPU_BARNES_HUT_SCHWARZSCHILD.md`. Stage 2 allocates
-Octree buffers, but no tree-building or force compute pass consumes them yet.
+This note records the repository findings and data contract for
+`KE_HOACH_TICH_HOP_GPU_BARNES_HUT_SCHWARZSCHILD.md`, including the implemented
+GPU Octree construction stage.
 
 ## Stage 0: Direct N-body baseline
 
@@ -16,12 +16,14 @@ Octree buffers, but no tree-building or force compute pass consumes them yet.
 | Integration | `integrate.comp` reads acceleration and collision output, writes `NextState`, then the manager swaps the current/next buffers and rebinds 0/1 without copying. |
 | Grid | `grid.comp` reads `CurrentState`, `ObjectDerived`, and `BaseGrid` (binding 4), writes `DeformedGrid` (binding 5), and retains the per-object Schwarzschild-radius displacement calculation. |
 | Existing synchronization | N-body and integration dispatches are each followed by `GL_SHADER_STORAGE_BARRIER_BIT`; the grid dispatch is followed by `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT`. |
-| SSBO allocation | `ComputePipeline()` allocates the Octree roles at bindings 6-8, 10, and 11. Binding 9 (`AccelerationField`) stays unallocated. The new buffers currently have no compute consumer. |
+| SSBO allocation | `ComputePipeline()` allocates the Octree roles at bindings 6-8, 10, and 11. The bounds/build passes consume bindings 0, 3, 7, 8, 10, and 11; `MassField` (6) is reserved for aggregation. Binding 9 (`AccelerationField`) stays unallocated. |
 
 Current frame order:
 
 ```text
 RunObjectStateSync
+  -> bounding_box.comp
+  -> build_octree.comp
   -> nbody.comp
   -> integrate.comp
   -> SwapCurrentNext
@@ -51,8 +53,8 @@ positions are not a reproducible baseline input.
 
 ### Integration points for later stages
 
-- Add the builder and dispatch ordering in `gravity_sim_3Dgrid_function.cpp`,
-  called after state synchronization and before the force solver.
+- Keep the Octree construction after state synchronization and before the force
+  solver so both consume the same `CurrentState` snapshot.
 - Keep collision results valid if the direct force loop is replaced or split.
 - Keep `integrate.comp`, `SwapCurrentNext()`, and the existing Schwarzschild grid
   path unchanged in the initial integration.
@@ -145,5 +147,42 @@ Uninitialized state; resizing resets metadata and invalidates the logical
 contents of the tree arrays. The runtime verifies each role's actual binding
 after creation and resize. A runtime growth test materialized 257 objects,
 exercising object buffers' 256-to-512 resize, corresponding Octree buffer
-resizes, and post-resize binding checks without errors. No GLSL shader currently
-consumes these records.
+resizes, and post-resize binding checks without errors.
+
+## Stage 3: GPU bounds and Octree construction
+
+`bounding_box.comp` scans `CurrentState` and excludes objects whose
+`ObjectControl.initializing` flag is set. It computes a finite padded cubic
+root, reports empty or invalid input through `OctreeMetadata`, and handles
+capacity mismatches without producing a usable tree. The root is offset from
+the component-wise minimum by the padding; its side is the longest extent plus
+twice that padding, ensuring the active AABB is enclosed.
+
+`build_octree.comp` builds a sparse breadth-first tree and partitions original
+object slots into contiguous leaf ranges in ascending octant order. Child blocks
+are contiguous, `links.z` records the occupied-octant mask, and
+`ObjectLeafIndex` maps active object slots to their leaf. Leaves stop splitting
+at the configured capacity or maximum depth, so coincident objects remain in a
+valid leaf at the depth limit. Empty input and object/node capacity failures
+produce explicit metadata statuses. Each pass is dispatched before its
+consumer with an SSBO memory barrier.
+
+The current implementation uses one compute invocation for each entire pass
+(`local_size_x = 1`). This favors a straightforward correctness baseline and is
+not a parallel or performance-optimized construction algorithm. Debug builds
+read back the result and validate object coverage and uniqueness, leaf mapping,
+child ranges/depths, and node bounds.
+
+The construction is called after object-state synchronization and before the
+existing Direct N-body pass. Direct N-body, integration, collision handling,
+buffer swapping, and Schwarzschild grid deformation remain unchanged; this
+stage does not yet consume the tree for force calculation.
+
+### Stage 3 runtime verification
+
+The Debug application ran in an isolated working directory with the default
+202-object scene. The debug Octree validator completed successfully while the
+application continued through Direct N-body, integration, and grid deformation
+for more than 240 frames and wrote its position capture. The default-scene run
+does not independently exercise an all-initializing scene or coincident-object
+input.
