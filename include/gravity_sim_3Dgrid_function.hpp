@@ -39,6 +39,9 @@ struct ShaderPrograms
     GLuint objectRendering = 0;
     GLuint boundingBoxCompute = 0;
     GLuint octreeBuildCompute = 0;
+    GLuint massAggregationCompute = 0;
+    GLuint barnesHutCompute = 0;
+    GLuint collisionCompute = 0;
     GLuint nbodyCompute = 0;
     GLuint integrateCompute = 0;
 };
@@ -59,6 +62,13 @@ struct ComputeUniformLocations
     GLint boundingBoxObjectCapacity = -1;
     GLint octreeBuildObjectCount = -1;
     GLint octreeBuildObjectCapacity = -1;
+
+    GLint barnesHutObjectCount = -1;
+    GLint barnesHutGravitationalConstant = -1;
+    GLint barnesHutEpsilon = -1;
+    GLint barnesHutTheta = -1;
+
+    GLint collisionObjectCount = -1;
 
     GLint nbodyObjectCount = -1;
     GLint nbodyGravitationalConstant = -1;
@@ -97,6 +107,11 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void RunOctreeConstruction(GLuint boundingBoxShaderProgram, GLuint octreeBuildShaderProgram,
                            const ComputeUniformLocations &locations, size_t objectCount);
+void RunMassAggregation(GLuint computeShaderProgram, size_t objectCount);
+void RunBarnesHutCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                         size_t objectCount, float epsilon, float theta);
+void RunCollisionCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                         size_t objectCount);
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                      size_t objectCount, float epsilon);
 void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
@@ -105,6 +120,10 @@ void RunObjectStateSync(GLFWwindow *window, size_t &objectCount);
 void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProgram,
                            const ComputeUniformLocations &locations, size_t objectCount,
                            float epsilon, bool paused, double timeStep);
+void RunBarnesHutStateTransition(GLuint barnesHutShaderProgram, GLuint collisionShaderProgram,
+                                GLuint integrateShaderProgram,
+                                const ComputeUniformLocations &locations, size_t objectCount,
+                                float epsilon, float theta, bool paused, double timeStep);
 void RunGridCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                     size_t objectCount);
 void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions);

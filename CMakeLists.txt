@@ -73,6 +73,9 @@ add_gravity_executable(gravity_sim_3Dgrid
     shaders/grid.comp
     shaders/bounding_box.comp
     shaders/build_octree.comp
+    shaders/mass_aggregation.comp
+    shaders/barnes_hut.comp
+    shaders/collision.comp
     shaders/nbody.comp
     shaders/integrate.comp
     shaders/objects.vert
@@ -88,6 +91,9 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grid.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/bounding_box.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/build_octree.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mass_aggregation.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/barnes_hut.comp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/collision.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/nbody.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/integrate.comp
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/objects.vert

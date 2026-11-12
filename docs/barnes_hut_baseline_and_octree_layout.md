@@ -2,7 +2,7 @@
 
 This note records the repository findings and data contract for
 `KE_HOACH_TICH_HOP_GPU_BARNES_HUT_SCHWARZSCHILD.md`, including the implemented
-GPU Octree construction stage.
+GPU Octree, mass aggregation, and Barnes-Hut force stages.
 
 ## Stage 0: Direct N-body baseline
 
@@ -12,11 +12,12 @@ GPU Octree construction stage.
 | --- | --- |
 | Object state | `GpuObjectState` contains two `vec4`s (32 bytes). `CurrentState` and `NextState` are bound at 0 and 1. |
 | Physics inputs | `ObjectPhysical` (mass/density) is binding 2; `ObjectControl` is binding 3; `ObjectDerived` (radius/Schwarzschild radius) is binding 12. |
-| Force and collision | `nbody.comp` launches one invocation per target, loops over all sources, excludes self and initializing objects, and writes both `ObjectAcceleration` (binding 13) and `ObjectCollision` (binding 15). |
+| Original force baseline | `nbody.comp` launches one invocation per target, loops over all sources, excludes self and initializing objects, and writes both `ObjectAcceleration` (binding 13) and `ObjectCollision` (binding 15). It remains available as a direct reference but is no longer the main simulation force pass. |
+| Current force and collision | `barnes_hut.comp` writes `ObjectAcceleration` (binding 13); `collision.comp` writes `ObjectCollision` (binding 15) using the prior pairwise overlap rule. |
 | Integration | `integrate.comp` reads acceleration and collision output, writes `NextState`, then the manager swaps the current/next buffers and rebinds 0/1 without copying. |
 | Grid | `grid.comp` reads `CurrentState`, `ObjectDerived`, and `BaseGrid` (binding 4), writes `DeformedGrid` (binding 5), and retains the per-object Schwarzschild-radius displacement calculation. |
-| Existing synchronization | N-body and integration dispatches are each followed by `GL_SHADER_STORAGE_BARRIER_BIT`; the grid dispatch is followed by `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT`. |
-| SSBO allocation | `ComputePipeline()` allocates the Octree roles at bindings 6-8, 10, and 11. The bounds/build passes consume bindings 0, 3, 7, 8, 10, and 11; `MassField` (6) is reserved for aggregation. Binding 9 (`AccelerationField`) stays unallocated. |
+| Existing synchronization | Each dependent compute dispatch (bounds, construction, aggregation, Barnes-Hut, collision, integration) is separated with `GL_SHADER_STORAGE_BARRIER_BIT`; the grid dispatch is followed by `GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT`. |
+| SSBO allocation | `ComputePipeline()` allocates the Octree roles at bindings 6-8, 10, and 11. Binding 9 (`AccelerationField`) stays unallocated. |
 
 Current frame order:
 
@@ -24,7 +25,9 @@ Current frame order:
 RunObjectStateSync
   -> bounding_box.comp
   -> build_octree.comp
-  -> nbody.comp
+  -> mass_aggregation.comp
+  -> barnes_hut.comp
+  -> collision.comp
   -> integrate.comp
   -> SwapCurrentNext
   -> grid.comp
@@ -173,10 +176,10 @@ not a parallel or performance-optimized construction algorithm. Debug builds
 read back the result and validate object coverage and uniqueness, leaf mapping,
 child ranges/depths, and node bounds.
 
-The construction is called after object-state synchronization and before the
-existing Direct N-body pass. Direct N-body, integration, collision handling,
-buffer swapping, and Schwarzschild grid deformation remain unchanged; this
-stage does not yet consume the tree for force calculation.
+The construction is called after object-state synchronization. Direct N-body
+was retained as a reference, while the main frame now uses the tree for force
+calculation; integration, collision behavior, buffer swapping, and
+Schwarzschild grid deformation are preserved.
 
 ### Stage 3 runtime verification
 
@@ -186,3 +189,42 @@ application continued through Direct N-body, integration, and grid deformation
 for more than 240 frames and wrote its position capture. The default-scene run
 does not independently exercise an all-initializing scene or coincident-object
 input.
+
+## Stage 4: Mass aggregation
+
+`mass_aggregation.comp` runs one invocation over the tree in reverse node-index
+order. Leaves sum source mass and mass-weighted positions from their contiguous
+object ranges; internal nodes combine their already-computed children. Double
+precision intermediates reduce accumulation error before storing each COM and
+mass in the existing `vec4` `MassField` layout. Empty input writes a zero root
+slot without dividing by zero, and non-finite/out-of-range input marks
+`InvalidAggregate`.
+
+Debug validation independently sums active CPU-mapped object masses and
+mass-weighted positions, compares the root mass and COM, and checks every
+aggregate for finite values. The checks use the same `CurrentState` snapshot as
+the tree builder.
+
+## Stage 5: GPU Barnes-Hut
+
+`barnes_hut.comp` launches one invocation per target and traverses the sparse
+Octree using a bounded local stack. The configured opening criterion is
+`nodeSide / distance < theta`, with `theta = 0.5`; any node whose bounds contain
+the target is always opened. Leaves evaluate direct source interactions, skip
+self-interaction, and ignore initializing objects. The force retains the
+existing `G`, position-to-meter conversion (`distance * 1000`), and epsilon
+softening formula. A stack of 129 indices covers the configured depth-16
+eight-way tree; overflow and malformed-tree/non-finite results set explicit
+metadata failure statuses instead of silently continuing.
+
+Collision remains a separate direct pairwise pass. It preserves the previous
+strict radius-overlap condition and skips exact zero-distance pairs as the
+original `nbody.comp` did. Integration, `SwapCurrentNext()`, and grid
+deformation remain downstream and unchanged.
+
+Debug validation checks finite accelerations and zero acceleration for
+initializing objects; it also compares collision counts against a CPU reference.
+The default 202-object scene ran through the construction, aggregation,
+Barnes-Hut, collision, integration, and grid passes without validation errors.
+This is a correctness smoke test, not a Barnes-Hut-vs-direct accuracy or
+performance benchmark; those measurements remain for Stage 8.

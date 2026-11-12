@@ -1,0 +1,266 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectPhysical
+{
+    vec4 massDensity;
+};
+
+struct OctreeNode
+{
+    uvec4 links;
+    uvec4 range;
+    vec4 boundsMinDiameter;
+    vec4 boundsMax;
+};
+
+struct GpuMassAggregate
+{
+    vec4 centerMass;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct ObjectAcceleration
+{
+    vec4 acceleration;
+};
+
+struct OctreeMetadata
+{
+    uvec4 counts;
+    uvec4 configuration;
+    vec4 rootBoundsMinDiameter;
+    vec4 rootBoundsMax;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer
+{
+    ObjectState objects[];
+};
+layout(std430, binding = 2) readonly buffer ObjectPhysicalBuffer
+{
+    ObjectPhysical physical[];
+};
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer
+{
+    ObjectControl controls[];
+};
+layout(std430, binding = 6) readonly buffer MassFieldBuffer
+{
+    GpuMassAggregate aggregates[];
+};
+layout(std430, binding = 7) readonly buffer OctreeNodesBuffer
+{
+    OctreeNode nodes[];
+};
+layout(std430, binding = 8) readonly buffer ObjectIndexListBuffer
+{
+    uint objectIndices[];
+};
+layout(std430, binding = 10) buffer OctreeMetadataBuffer
+{
+    OctreeMetadata metadata;
+};
+layout(std430, binding = 13) writeonly buffer ObjectAccelerationBuffer
+{
+    ObjectAcceleration accelerations[];
+};
+
+uniform uint u_objectCount;
+uniform double u_gravitationalConstant;
+uniform float u_epsilon;
+uniform float u_theta;
+
+const uint kStatusEmpty = 2u;
+const uint kStatusValid = 3u;
+const uint kStatusTraversalStackOverflow = 8u;
+const uint kStatusInvalidTree = 9u;
+const uint kStatusNonFiniteAcceleration = 10u;
+const uint kNodeFlagLeaf = 2u;
+const uint kMaxTraversalStack = 8u * 16u + 1u;
+
+void ReportFailure(uint status)
+{
+    atomicCompSwap(metadata.configuration.w, kStatusValid, status);
+}
+
+double AccelerationMagnitude(double sourceMass, float distance, float epsilon)
+{
+    double distanceMeters = double(distance) * 1000.0;
+    double softenedDistanceSquared =
+        distanceMeters * distanceMeters + double(epsilon) * double(epsilon);
+    return u_gravitationalConstant * sourceMass / softenedDistanceSquared;
+}
+
+void main()
+{
+    uint targetIndex = gl_GlobalInvocationID.x;
+    if (targetIndex >= u_objectCount)
+    {
+        return;
+    }
+
+    if (controls[targetIndex].initializing != 0u ||
+        metadata.configuration.w == kStatusEmpty)
+    {
+        accelerations[targetIndex].acceleration = vec4(0.0);
+        return;
+    }
+    if (metadata.configuration.w != kStatusValid || metadata.counts.y == 0u ||
+        metadata.counts.y > metadata.configuration.z || !(u_theta > 0.0) ||
+        isnan(u_theta) || isinf(u_theta))
+    {
+        accelerations[targetIndex].acceleration = vec4(0.0);
+        ReportFailure(kStatusInvalidTree);
+        return;
+    }
+
+    vec3 targetPosition = objects[targetIndex].position.xyz;
+    vec3 totalAcceleration = vec3(0.0);
+    uint stack[kMaxTraversalStack];
+    uint stackSize = 1u;
+    stack[0] = 0u;
+
+    while (stackSize > 0u)
+    {
+        uint nodeIndex = stack[--stackSize];
+        if (nodeIndex >= metadata.counts.y)
+        {
+            ReportFailure(kStatusInvalidTree);
+            totalAcceleration = vec3(0.0);
+            break;
+        }
+
+        OctreeNode node = nodes[nodeIndex];
+        if ((node.links.w & 1u) == 0u)
+        {
+            ReportFailure(kStatusInvalidTree);
+            totalAcceleration = vec3(0.0);
+            break;
+        }
+
+        if ((node.links.w & kNodeFlagLeaf) != 0u)
+        {
+            uint firstObject = node.range.x;
+            uint leafObjectCount = node.range.y;
+            if (firstObject > metadata.counts.x ||
+                leafObjectCount > metadata.counts.x - firstObject)
+            {
+                ReportFailure(kStatusInvalidTree);
+                totalAcceleration = vec3(0.0);
+                break;
+            }
+            for (uint offset = 0u; offset < leafObjectCount; ++offset)
+            {
+                uint sourceIndex = objectIndices[firstObject + offset];
+                if (sourceIndex >= u_objectCount)
+                {
+                    ReportFailure(kStatusInvalidTree);
+                    totalAcceleration = vec3(0.0);
+                    stackSize = 0u;
+                    break;
+                }
+                if (sourceIndex == targetIndex || controls[sourceIndex].initializing != 0u)
+                {
+                    continue;
+                }
+
+                vec3 displacement = objects[sourceIndex].position.xyz - targetPosition;
+                float distance = length(displacement);
+                if (distance <= 0.0)
+                {
+                    continue;
+                }
+                double sourceMass = double(physical[sourceIndex].massDensity.x);
+                float accelerationMagnitude =
+                    float(AccelerationMagnitude(sourceMass, distance, u_epsilon));
+                totalAcceleration += (displacement / distance) * accelerationMagnitude;
+            }
+            continue;
+        }
+
+        if (node.links.y == 0u || node.links.x > metadata.counts.y ||
+            node.links.y > metadata.counts.y - node.links.x ||
+            (node.links.z & 0xFFFFFF00u) != 0u)
+        {
+            ReportFailure(kStatusInvalidTree);
+            totalAcceleration = vec3(0.0);
+            break;
+        }
+
+        vec4 aggregate = aggregates[nodeIndex].centerMass;
+        if (any(isnan(aggregate)) || any(isinf(aggregate)))
+        {
+            ReportFailure(kStatusInvalidTree);
+            totalAcceleration = vec3(0.0);
+            break;
+        }
+
+        vec3 displacement = aggregate.xyz - targetPosition;
+        float distance = length(displacement);
+        vec3 nodeMin = node.boundsMinDiameter.xyz;
+        vec3 nodeMax = node.boundsMax.xyz;
+        bool containsTarget = all(greaterThanEqual(targetPosition, nodeMin)) &&
+                              all(lessThanEqual(targetPosition, nodeMax));
+        bool acceptAggregate = !containsTarget && aggregate.w != 0.0 && distance > 0.0 &&
+                               node.boundsMinDiameter.w / distance < u_theta;
+        if (acceptAggregate)
+        {
+            float accelerationMagnitude =
+                float(AccelerationMagnitude(double(aggregate.w), distance, u_epsilon));
+            totalAcceleration += (displacement / distance) * accelerationMagnitude;
+            continue;
+        }
+
+        if (stackSize + node.links.y > kMaxTraversalStack)
+        {
+            ReportFailure(kStatusTraversalStackOverflow);
+            totalAcceleration = vec3(0.0);
+            break;
+        }
+
+        uint childRank = 0u;
+        for (uint octant = 0u; octant < 8u; ++octant)
+        {
+            if ((node.links.z & (1u << octant)) == 0u)
+            {
+                continue;
+            }
+            if (childRank >= node.links.y)
+            {
+                ReportFailure(kStatusInvalidTree);
+                totalAcceleration = vec3(0.0);
+                stackSize = 0u;
+                break;
+            }
+            stack[stackSize++] = node.links.x + childRank;
+            ++childRank;
+        }
+        if (childRank != node.links.y)
+        {
+            ReportFailure(kStatusInvalidTree);
+            totalAcceleration = vec3(0.0);
+        }
+    }
+
+    if (any(isnan(totalAcceleration)) || any(isinf(totalAcceleration)))
+    {
+        ReportFailure(kStatusNonFiniteAcceleration);
+        totalAcceleration = vec3(0.0);
+    }
+    accelerations[targetIndex].acceleration = vec4(totalAcceleration, 0.0);
+}

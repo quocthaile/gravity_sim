@@ -1,0 +1,80 @@
+#version 440 core
+
+layout(local_size_x = 64) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectControl
+{
+    uint initializing;
+    uint launched;
+    uint target;
+    uint id;
+};
+
+struct ObjectDerived
+{
+    vec4 radiusRs;
+};
+
+struct ObjectCollision
+{
+    uint overlapCount;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer
+{
+    ObjectState objects[];
+};
+layout(std430, binding = 3) readonly buffer ObjectControlBuffer
+{
+    ObjectControl controls[];
+};
+layout(std430, binding = 12) readonly buffer ObjectDerivedBuffer
+{
+    ObjectDerived derived[];
+};
+layout(std430, binding = 15) writeonly buffer ObjectCollisionBuffer
+{
+    ObjectCollision collisions[];
+};
+
+uniform uint u_objectCount;
+
+void main()
+{
+    uint targetIndex = gl_GlobalInvocationID.x;
+    if (targetIndex >= u_objectCount)
+    {
+        return;
+    }
+    if (controls[targetIndex].initializing != 0u)
+    {
+        collisions[targetIndex].overlapCount = 0u;
+        return;
+    }
+
+    vec3 targetPosition = objects[targetIndex].position.xyz;
+    uint overlapCount = 0u;
+    for (uint sourceIndex = 0u; sourceIndex < u_objectCount; ++sourceIndex)
+    {
+        if (sourceIndex == targetIndex || controls[sourceIndex].initializing != 0u)
+        {
+            continue;
+        }
+        float distance = length(objects[sourceIndex].position.xyz - targetPosition);
+        if (distance <= 0.0)
+        {
+            continue;
+        }
+        if (derived[sourceIndex].radiusRs.x + derived[targetIndex].radiusRs.x > distance)
+        {
+            ++overlapCount;
+        }
+    }
+    collisions[targetIndex].overlapCount = overlapCount;
+}

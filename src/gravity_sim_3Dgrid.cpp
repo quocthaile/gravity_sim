@@ -133,6 +133,7 @@ int main()
 
     // Main loop: runs until the window is closed or the simulation is stopped.
     int numofFrames = 0;
+    constexpr float barnesHutTheta = 0.5f;
     while (!glfwWindowShouldClose(window) && running == true)
     {
         std::cout << "Frame: " << numofFrames << ", Delta Time: " << deltaTime << " s" << std::endl;
@@ -147,8 +148,11 @@ int main()
         RunObjectStateSync(window, objectCount);
         RunOctreeConstruction(shaderPrograms.boundingBoxCompute, shaderPrograms.octreeBuildCompute,
                               computeUniformLocations, objectCount);
-        RunGpuStateTransition(shaderPrograms.nbodyCompute, shaderPrograms.integrateCompute,
-                              computeUniformLocations, objectCount, epsilon, pause, dt);
+        RunMassAggregation(shaderPrograms.massAggregationCompute, objectCount);
+        RunBarnesHutStateTransition(shaderPrograms.barnesHutCompute,
+                                    shaderPrograms.collisionCompute,
+                                    shaderPrograms.integrateCompute, computeUniformLocations,
+                                    objectCount, epsilon, barnesHutTheta, pause, dt);
         if (!saved && (numofFrames + 1) % trajectorySampleInterval == 0)
         {
             CaptureGpuTrajectorySample(positions);

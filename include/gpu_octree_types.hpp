@@ -34,7 +34,21 @@ enum class GpuOctreeBuildStatus : std::uint32_t
     NodeCapacityExceeded,
     ObjectCapacityExceeded,
     InvalidBounds,
+    InvalidAggregate,
+    TraversalStackOverflow,
+    InvalidTree,
+    NonFiniteAcceleration,
 };
+
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::Empty) == 2);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::Valid) == 3);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::NodeCapacityExceeded) == 4);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::ObjectCapacityExceeded) == 5);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::InvalidBounds) == 6);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::InvalidAggregate) == 7);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::TraversalStackOverflow) == 8);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::InvalidTree) == 9);
+static_assert(static_cast<std::uint32_t>(GpuOctreeBuildStatus::NonFiniteAcceleration) == 10);
 
 struct alignas(16) GpuMassAggregate
 {

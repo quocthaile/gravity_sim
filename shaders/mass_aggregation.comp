@@ -1,0 +1,181 @@
+#version 440 core
+
+layout(local_size_x = 1) in;
+
+struct ObjectState
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+struct ObjectPhysical
+{
+    vec4 massDensity;
+};
+
+struct OctreeNode
+{
+    uvec4 links;
+    uvec4 range;
+    vec4 boundsMinDiameter;
+    vec4 boundsMax;
+};
+
+struct GpuMassAggregate
+{
+    vec4 centerMass;
+};
+
+struct OctreeMetadata
+{
+    uvec4 counts;
+    uvec4 configuration;
+    vec4 rootBoundsMinDiameter;
+    vec4 rootBoundsMax;
+};
+
+layout(std430, binding = 0) readonly buffer CurrentStateBuffer
+{
+    ObjectState objects[];
+};
+layout(std430, binding = 2) readonly buffer ObjectPhysicalBuffer
+{
+    ObjectPhysical physical[];
+};
+layout(std430, binding = 6) buffer MassFieldBuffer
+{
+    GpuMassAggregate aggregates[];
+};
+layout(std430, binding = 7) readonly buffer OctreeNodesBuffer
+{
+    OctreeNode nodes[];
+};
+layout(std430, binding = 8) readonly buffer ObjectIndexListBuffer
+{
+    uint objectIndices[];
+};
+layout(std430, binding = 10) buffer OctreeMetadataBuffer
+{
+    OctreeMetadata metadata;
+};
+
+const uint kStatusEmpty = 2u;
+const uint kStatusValid = 3u;
+const uint kStatusInvalidAggregate = 7u;
+const uint kNodeFlagLeaf = 2u;
+
+bool IsFinite(float value)
+{
+    return !isnan(value) && !isinf(value);
+}
+
+void FailAggregation()
+{
+    metadata.configuration.w = kStatusInvalidAggregate;
+}
+
+void main()
+{
+    if (metadata.configuration.w == kStatusEmpty)
+    {
+        aggregates[0].centerMass = vec4(0.0);
+        return;
+    }
+    if (metadata.configuration.w != kStatusValid)
+    {
+        return;
+    }
+
+    uint nodeCount = metadata.counts.y;
+    uint activeObjectCount = metadata.counts.x;
+    if (nodeCount == 0u || nodeCount > metadata.configuration.z)
+    {
+        FailAggregation();
+        return;
+    }
+
+    for (uint reverseIndex = 0u; reverseIndex < nodeCount; ++reverseIndex)
+    {
+        uint nodeIndex = nodeCount - 1u - reverseIndex;
+        OctreeNode node = nodes[nodeIndex];
+        double totalMass = 0.0;
+        dvec3 weightedPosition = dvec3(0.0);
+
+        if ((node.links.w & kNodeFlagLeaf) != 0u)
+        {
+            uint firstObject = node.range.x;
+            uint objectCount = node.range.y;
+            if (firstObject > activeObjectCount ||
+                objectCount > activeObjectCount - firstObject)
+            {
+                FailAggregation();
+                return;
+            }
+
+            for (uint offset = 0u; offset < objectCount; ++offset)
+            {
+                uint objectIndex = objectIndices[firstObject + offset];
+                if (objectIndex >= uint(physical.length()) ||
+                    objectIndex >= uint(objects.length()))
+                {
+                    FailAggregation();
+                    return;
+                }
+
+                double mass = double(physical[objectIndex].massDensity.x);
+                vec3 position = objects[objectIndex].position.xyz;
+                if (isnan(mass) || isinf(mass) || any(isnan(position)) || any(isinf(position)))
+                {
+                    FailAggregation();
+                    return;
+                }
+                totalMass += mass;
+                weightedPosition += dvec3(position) * mass;
+            }
+        }
+        else
+        {
+            uint childIndex = node.links.x;
+            uint childCount = node.links.y;
+            if (childCount == 0u || childIndex > nodeCount ||
+                childCount > nodeCount - childIndex || childIndex <= nodeIndex)
+            {
+                FailAggregation();
+                return;
+            }
+
+            for (uint childOffset = 0u; childOffset < childCount; ++childOffset)
+            {
+                vec4 childAggregate = aggregates[childIndex + childOffset].centerMass;
+                if (any(isnan(childAggregate)) || any(isinf(childAggregate)))
+                {
+                    FailAggregation();
+                    return;
+                }
+                double childMass = double(childAggregate.w);
+                totalMass += childMass;
+                weightedPosition += dvec3(childAggregate.xyz) * childMass;
+            }
+        }
+
+        if (isnan(totalMass) || isinf(totalMass) || any(isnan(weightedPosition)) ||
+            any(isinf(weightedPosition)))
+        {
+            FailAggregation();
+            return;
+        }
+
+        dvec3 centerOfMass = dvec3(0.0);
+        if (totalMass != 0.0)
+        {
+            centerOfMass = weightedPosition / totalMass;
+        }
+        vec4 aggregate = vec4(vec3(centerOfMass), float(totalMass));
+        if (any(isnan(aggregate)) || any(isinf(aggregate)))
+        {
+            FailAggregation();
+            return;
+        }
+        aggregates[nodeIndex].centerMass = aggregate;
+    }
+}

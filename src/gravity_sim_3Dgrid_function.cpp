@@ -170,6 +170,9 @@ void CreateShaderProgram(ShaderPrograms &shaderPrograms)
     shaderPrograms.gridCompute = CreateComputeProgram("shaders/grid.comp");
     shaderPrograms.boundingBoxCompute = CreateComputeProgram("shaders/bounding_box.comp");
     shaderPrograms.octreeBuildCompute = CreateComputeProgram("shaders/build_octree.comp");
+    shaderPrograms.massAggregationCompute = CreateComputeProgram("shaders/mass_aggregation.comp");
+    shaderPrograms.barnesHutCompute = CreateComputeProgram("shaders/barnes_hut.comp");
+    shaderPrograms.collisionCompute = CreateComputeProgram("shaders/collision.comp");
     shaderPrograms.nbodyCompute = CreateComputeProgram("shaders/nbody.comp");
     shaderPrograms.integrateCompute = CreateComputeProgram("shaders/integrate.comp");
 }
@@ -197,6 +200,17 @@ void InitializeComputeUniformLocations(const ShaderPrograms &programs,
         getRequiredLocation(programs.octreeBuildCompute, "octreeBuildCompute", "u_objectCount");
     locations.octreeBuildObjectCapacity = getRequiredLocation(
         programs.octreeBuildCompute, "octreeBuildCompute", "u_objectCapacity");
+
+    locations.barnesHutObjectCount =
+        getRequiredLocation(programs.barnesHutCompute, "barnesHutCompute", "u_objectCount");
+    locations.barnesHutGravitationalConstant = getRequiredLocation(
+        programs.barnesHutCompute, "barnesHutCompute", "u_gravitationalConstant");
+    locations.barnesHutEpsilon =
+        getRequiredLocation(programs.barnesHutCompute, "barnesHutCompute", "u_epsilon");
+    locations.barnesHutTheta =
+        getRequiredLocation(programs.barnesHutCompute, "barnesHutCompute", "u_theta");
+    locations.collisionObjectCount =
+        getRequiredLocation(programs.collisionCompute, "collisionCompute", "u_objectCount");
 
     locations.nbodyObjectCount =
         getRequiredLocation(programs.nbodyCompute, "nbodyCompute", "u_objectCount");
@@ -772,10 +786,17 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
 void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
 {
     GLint maxStorageBufferBindings = 0;
+    GLint maxComputeStorageBlocks = 0;
     glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxStorageBufferBindings);
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &maxComputeStorageBlocks);
     if (maxStorageBufferBindings <= static_cast<GLint>(BindingFor(BufferRole::ObjectCollision)))
     {
         throw std::runtime_error("OpenGL does not provide SSBO binding 15 for ObjectCollision");
+    }
+    if (maxComputeStorageBlocks < 8)
+    {
+        throw std::runtime_error(
+            "OpenGL does not provide enough compute SSBO blocks for Barnes-Hut traversal");
     }
 
     objectStateCapacity = CalculateObjectStateBufferCapacity(objs.size());
@@ -795,15 +816,15 @@ void ComputePipeline(const std::vector<glm::vec4> &gridVertices)
                              MappingMode::PersistentCoherent, sizeof(GpuObjectState),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectPhysical, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectPhysical),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectDerived, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectDerived),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectControl, GL_SHADER_STORAGE_BUFFER,
-                             GpuStorageMode::GpuResident, CpuAccess::Write,
+                             GpuStorageMode::GpuResident, CpuAccess::ReadWrite,
                              MappingMode::PersistentCoherent, sizeof(GpuObjectControl),
                              objectStateCapacity});
     gpuMemoryManager.Create({BufferRole::ObjectAcceleration, GL_SHADER_STORAGE_BUFFER,
@@ -1088,6 +1109,185 @@ void ValidateOctreeDebug(std::size_t objectCount)
         }
     }
 }
+
+GpuOctreeMetadata ReadOctreeMetadataDebug()
+{
+    const GpuBuffer &metadataBuffer = gpuMemoryManager.Get(BufferRole::OctreeMetadata);
+    GpuOctreeMetadata metadata{};
+    glBindBuffer(GL_COPY_READ_BUFFER, metadataBuffer.Handle());
+    glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(metadata), &metadata);
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    return metadata;
+}
+
+void ValidateMassAggregationDebug(std::size_t objectCount)
+{
+    const GpuOctreeMetadata metadata = ReadOctreeMetadataDebug();
+    const auto status = static_cast<GpuOctreeBuildStatus>(metadata.configuration.w);
+    const auto *controls =
+        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    const auto *states =
+        gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    const auto *physical =
+        gpuMemoryManager.Get(BufferRole::ObjectPhysical).MappedPtr<GpuObjectPhysical>();
+    if (controls == nullptr || states == nullptr || physical == nullptr)
+    {
+        throw std::runtime_error("Object buffers are unavailable for mass validation");
+    }
+
+    std::size_t expectedActiveCount = 0;
+    double expectedMass = 0.0;
+    double weightedX = 0.0;
+    double weightedY = 0.0;
+    double weightedZ = 0.0;
+    for (std::size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+    {
+        if (controls[objectIndex].initializing != 0u)
+        {
+            continue;
+        }
+        const double mass = physical[objectIndex].massDensity.x;
+        const glm::vec3 position = states[objectIndex].position;
+        if (!std::isfinite(mass) || !std::isfinite(position.x) || !std::isfinite(position.y) ||
+            !std::isfinite(position.z))
+        {
+            throw std::runtime_error("Mass validation found non-finite active-object input");
+        }
+        ++expectedActiveCount;
+        expectedMass += mass;
+        weightedX += static_cast<double>(position.x) * mass;
+        weightedY += static_cast<double>(position.y) * mass;
+        weightedZ += static_cast<double>(position.z) * mass;
+    }
+
+    if (metadata.counts.x != expectedActiveCount)
+    {
+        throw std::runtime_error("Mass aggregation active-object count differs from ObjectControl");
+    }
+    if (expectedActiveCount == 0)
+    {
+        if (status != GpuOctreeBuildStatus::Empty)
+        {
+            throw std::runtime_error("Mass aggregation did not preserve the empty-tree status");
+        }
+        return;
+    }
+    if (status != GpuOctreeBuildStatus::Valid || metadata.counts.y == 0u ||
+        metadata.counts.w >= metadata.counts.y)
+    {
+        throw std::runtime_error("Mass aggregation did not produce a valid root aggregate");
+    }
+
+    const auto aggregates =
+        ReadOctreeBuffer<GpuMassAggregate>(BufferRole::MassField, metadata.counts.y);
+    for (const GpuMassAggregate &aggregate : aggregates)
+    {
+        if (!std::isfinite(aggregate.centerMass.x) ||
+            !std::isfinite(aggregate.centerMass.y) ||
+            !std::isfinite(aggregate.centerMass.z) ||
+            !std::isfinite(aggregate.centerMass.w))
+        {
+            throw std::runtime_error("Mass aggregation produced a non-finite node aggregate");
+        }
+    }
+
+    const glm::vec4 root = aggregates[metadata.counts.w].centerMass;
+    if (!IsNearlyEqual(root.w, static_cast<float>(expectedMass)))
+    {
+        throw std::runtime_error("Octree root mass differs from the CPU reference sum");
+    }
+    if (expectedMass != 0.0)
+    {
+        const glm::vec3 expectedCenter(
+            static_cast<float>(weightedX / expectedMass),
+            static_cast<float>(weightedY / expectedMass),
+            static_cast<float>(weightedZ / expectedMass));
+        if (!IsNearlyEqual(root.x, expectedCenter.x) ||
+            !IsNearlyEqual(root.y, expectedCenter.y) ||
+            !IsNearlyEqual(root.z, expectedCenter.z))
+        {
+            throw std::runtime_error("Octree root center of mass differs from the CPU reference");
+        }
+    }
+}
+
+void ValidateBarnesHutDebug(std::size_t objectCount)
+{
+    const GpuOctreeMetadata metadata = ReadOctreeMetadataDebug();
+    const auto status = static_cast<GpuOctreeBuildStatus>(metadata.configuration.w);
+    if (status != GpuOctreeBuildStatus::Valid && status != GpuOctreeBuildStatus::Empty)
+    {
+        throw std::runtime_error("Barnes-Hut traversal failed; metadata status=" +
+                                 std::to_string(metadata.configuration.w));
+    }
+
+    const auto *controls =
+        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    const auto *accelerations =
+        gpuMemoryManager.Get(BufferRole::ObjectAcceleration).MappedPtr<GpuObjectAcceleration>();
+    if (controls == nullptr || accelerations == nullptr)
+    {
+        throw std::runtime_error("Object buffers are unavailable for Barnes-Hut validation");
+    }
+
+    for (std::size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+    {
+        const glm::vec4 acceleration = accelerations[objectIndex].acceleration;
+        if (!std::isfinite(acceleration.x) || !std::isfinite(acceleration.y) ||
+            !std::isfinite(acceleration.z))
+        {
+            throw std::runtime_error("Barnes-Hut produced a non-finite object acceleration");
+        }
+        if (controls[objectIndex].initializing != 0u &&
+            (acceleration.x != 0.0f || acceleration.y != 0.0f || acceleration.z != 0.0f))
+        {
+            throw std::runtime_error("Barnes-Hut assigned acceleration to an initializing object");
+        }
+    }
+}
+
+void ValidateCollisionDebug(std::size_t objectCount)
+{
+    const auto *controls =
+        gpuMemoryManager.Get(BufferRole::ObjectControl).MappedPtr<GpuObjectControl>();
+    const auto *states =
+        gpuMemoryManager.Get(BufferRole::CurrentState).MappedPtr<GpuObjectState>();
+    const auto *derived =
+        gpuMemoryManager.Get(BufferRole::ObjectDerived).MappedPtr<GpuObjectDerived>();
+    const auto *collisions =
+        gpuMemoryManager.Get(BufferRole::ObjectCollision).MappedPtr<GpuObjectCollision>();
+    if (controls == nullptr || states == nullptr || derived == nullptr || collisions == nullptr)
+    {
+        throw std::runtime_error("Object buffers are unavailable for collision validation");
+    }
+
+    for (std::size_t targetIndex = 0; targetIndex < objectCount; ++targetIndex)
+    {
+        std::uint32_t expectedOverlapCount = 0;
+        if (controls[targetIndex].initializing == 0u)
+        {
+            const glm::vec3 targetPosition = states[targetIndex].position;
+            for (std::size_t sourceIndex = 0; sourceIndex < objectCount; ++sourceIndex)
+            {
+                if (sourceIndex == targetIndex || controls[sourceIndex].initializing != 0u)
+                {
+                    continue;
+                }
+                const float distance =
+                    glm::length(glm::vec3(states[sourceIndex].position) - targetPosition);
+                if (distance > 0.0f &&
+                    derived[sourceIndex].radiusRs.x + derived[targetIndex].radiusRs.x > distance)
+                {
+                    ++expectedOverlapCount;
+                }
+            }
+        }
+        if (collisions[targetIndex].overlapCount != expectedOverlapCount)
+        {
+            throw std::runtime_error("Collision pass differs from the direct reference count");
+        }
+    }
+}
 } // namespace
 #endif
 
@@ -1130,6 +1330,101 @@ void RunOctreeConstruction(GLuint boundingBoxShaderProgram, GLuint octreeBuildSh
     catch (const std::exception &error)
     {
         std::cerr << "Octree debug validation failed: " << error.what() << std::endl;
+        throw;
+    }
+#endif
+}
+
+void RunMassAggregation(GLuint computeShaderProgram, size_t objectCount)
+{
+    glUseProgram(computeShaderProgram);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT |
+                    GL_SHADER_STORAGE_BARRIER_BIT);
+    gpuMemoryManager.WaitForGpuCompletion();
+    try
+    {
+        ValidateMassAggregationDebug(objectCount);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Mass aggregation debug validation failed: " << error.what() << std::endl;
+        throw;
+    }
+#else
+    (void)objectCount;
+#endif
+}
+
+void RunBarnesHutCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                         size_t objectCount, float epsilon, float theta)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+    if (objectCount > std::numeric_limits<GLuint>::max() || !(theta > 0.0f) ||
+        !std::isfinite(theta) || !(epsilon >= 0.0f) || !std::isfinite(epsilon))
+    {
+        throw std::invalid_argument("Invalid Barnes-Hut object count, theta, or softening value");
+    }
+
+    constexpr GLuint localSizeX = 64;
+    const GLuint groupCountX =
+        static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(locations.barnesHutObjectCount, static_cast<GLuint>(objectCount));
+    glUniform1d(locations.barnesHutGravitationalConstant, kGravitationalConstant);
+    glUniform1f(locations.barnesHutEpsilon, epsilon);
+    glUniform1f(locations.barnesHutTheta, theta);
+    glDispatchCompute(groupCountX, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT |
+                    GL_SHADER_STORAGE_BARRIER_BIT);
+    gpuMemoryManager.WaitForGpuCompletion();
+    try
+    {
+        ValidateBarnesHutDebug(objectCount);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Barnes-Hut debug validation failed: " << error.what() << std::endl;
+        throw;
+    }
+#endif
+}
+
+void RunCollisionCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
+                         size_t objectCount)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+    constexpr GLuint localSizeX = 64;
+    const GLuint groupCountX =
+        static_cast<GLuint>((objectCount + localSizeX - 1) / localSizeX);
+    glUseProgram(computeShaderProgram);
+    glUniform1ui(locations.collisionObjectCount, static_cast<GLuint>(objectCount));
+    glDispatchCompute(groupCountX, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT |
+                    GL_SHADER_STORAGE_BARRIER_BIT);
+    gpuMemoryManager.WaitForGpuCompletion();
+    try
+    {
+        ValidateCollisionDebug(objectCount);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Collision debug validation failed: " << error.what() << std::endl;
         throw;
     }
 #endif
@@ -1202,6 +1497,33 @@ void RunGpuStateTransition(GLuint nbodyShaderProgram, GLuint integrateShaderProg
     }
 }
 
+void RunBarnesHutStateTransition(GLuint barnesHutShaderProgram, GLuint collisionShaderProgram,
+                                GLuint integrateShaderProgram,
+                                const ComputeUniformLocations &locations, size_t objectCount,
+                                float epsilon, float theta, bool paused, double timeStep)
+{
+    if (objectCount == 0)
+    {
+        return;
+    }
+
+    glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+    RunBarnesHutCompute(barnesHutShaderProgram, locations, objectCount, epsilon, theta);
+    RunCollisionCompute(collisionShaderProgram, locations, objectCount);
+    RunIntegration(integrateShaderProgram, locations, objectCount, paused, timeStep);
+    gpuMemoryManager.SwapCurrentNext();
+
+    static bool reportedRoles = false;
+    if (!reportedRoles)
+    {
+        std::cout << "GPU Barnes-Hut state roles after first transition: CurrentState buffer="
+                  << gpuMemoryManager.Get(BufferRole::CurrentState).Handle()
+                  << ", NextState buffer="
+                  << gpuMemoryManager.Get(BufferRole::NextState).Handle() << std::endl;
+        reportedRoles = true;
+    }
+}
+
 void CaptureGpuTrajectorySample(std::vector<std::vector<glm::vec3>> &positions)
 {
     gpuMemoryManager.WaitForGpuCompletion();
@@ -1251,6 +1573,9 @@ void Cleanup(const ShaderPrograms &shaderPrograms)
     glDeleteProgram(shaderPrograms.gridCompute);
     glDeleteProgram(shaderPrograms.boundingBoxCompute);
     glDeleteProgram(shaderPrograms.octreeBuildCompute);
+    glDeleteProgram(shaderPrograms.massAggregationCompute);
+    glDeleteProgram(shaderPrograms.barnesHutCompute);
+    glDeleteProgram(shaderPrograms.collisionCompute);
     glDeleteProgram(shaderPrograms.objectRendering);
     glDeleteProgram(shaderPrograms.nbodyCompute);
     glDeleteProgram(shaderPrograms.integrateCompute);
