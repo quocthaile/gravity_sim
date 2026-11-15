@@ -455,17 +455,195 @@ Chỉ dùng persistent mapping khi thực sự có yêu cầu CPU truy cập d�
 
 **Đầu ra:** biến dạng lưới vẫn dựa trên Schwarzschild như phiên bản trước; thay đổi quỹ đạo chỉ đến từ solver gia tốc mới.
 
-### Giai đoạn 8 — Kiểm thử độ đúng và hiệu năng
+## GIAI ĐOẠN 8 — KIỂM THỬ VÀ ĐÁNH GIÁ ĐỘ CHÍNH XÁC, HIỆU NĂNG
 
-- So sánh gia tốc Barnes–Hut với Direct N-body trên cùng snapshot, không tích phân xen kẽ giữa hai lần đo.
-- Kiểm thử nhiều số lượng vật thể và nhiều cấu hình phân bố không gian.
-- Đánh giá sai số gia tốc và sai số vị trí sau một khoảng mô phỏng cố định.
-- Thử nhiều giá trị `theta`; không chọn giá trị chỉ vì frame rate cao.
-- Đo riêng thời gian Bounding Box, Octree Construction, Mass Aggregation, Barnes–Hut, Integration và Grid Deformation.
-- So sánh tổng thời gian mỗi frame với Direct N-body. Với số vật thể nhỏ, chi phí xây cây có thể làm Barnes–Hut chậm hơn; phải ghi nhận kết quả thực tế.
-- Kiểm tra NaN/Inf, node overflow, traversal overflow, buffer out-of-bounds và lỗi đồng bộ.
+### 8.1. Mục tiêu
 
-**Đầu ra:** bảng kết quả độ đúng và hiệu năng; nêu rõ số vật thể, cấu hình, `theta`, thiết bị và phương pháp đo.
+Đánh giá chương trình mới sử dụng Barnes–Hut kết hợp tối ưu hóa GPU so với chương trình Baseline sử dụng Direct N-body về:
+
+- Độ chính xác của gia tốc, lực hấp dẫn, vị trí và vận tốc.
+- Hiệu năng xử lý CPU và GPU.
+- Mức độ thay đổi sai số và thời gian thực thi theo số lượng vật thể và tham số Barnes–Hut.
+
+Mọi kết luận về độ chính xác và hiệu năng phải dựa trên kết quả thực nghiệm, không được suy luận rằng chương trình nhanh hơn chỉ vì đã triển khai Octree, Mass Aggregation hoặc chuyển tính toán sang GPU.
+
+### 8.2. Xây dựng module tính sai số
+
+Tạo hai file dùng chung:
+
+- `numerical_utils.h`: khai báo cấu trúc dữ liệu, các hàm tính sai số và kiểu con trỏ hàm.
+- `numerical_utils.cpp`: triển khai các hàm tính toán sai số.
+
+Sử dụng Function Pointer để tổ chức và gọi các hàm tính sai số. Phạm vi áp dụng chỉ giới hạn trong module này, không thay đổi kiến trúc của hai chương trình mô phỏng.
+
+Giữ nguyên công thức và ý nghĩa của RMSE, MAPE hiện có. Bổ sung các chỉ số:
+
+- RMSE (Root Mean Square Error).
+- MAPE (Mean Absolute Percentage Error).
+- Max Absolute Error.
+- Relative Error.
+- Position RMSE.
+- Max Position Error.
+- Sai số gia tốc, lực hấp dẫn và vận tốc.
+
+Các phép tính phải xác định rõ đại lượng được đánh giá. Với MAPE và Relative Error, cần xử lý trường hợp giá trị tham chiếu bằng 0 hoặc gần 0.
+
+### 8.3. Triển khai quy trình kiểm thử
+
+**Bước 1 — Chạy Baseline**
+
+Sử dụng `gravity_sim_3Dgrid_baseline.cpp` để chạy thuật toán Direct N-body.
+
+- Giữ nguyên thuật toán và logic mô phỏng hiện tại.
+- Lưu kết quả cần thiết để làm dữ liệu tham chiếu.
+- Lưu vị trí, vận tốc, gia tốc và lực hấp dẫn nếu có.
+- Lưu kết quả theo `object_id` và `step` để phục vụ đối chiếu.
+- Ghi lại thông tin cấu hình và hiệu năng của lần chạy.
+
+**Bước 2 — Chạy chương trình mới**
+
+Sử dụng `gravity_sim_3Dgrid.cpp` để chạy thuật toán Barnes–Hut.
+
+- Giữ nguyên thuật toán và các tối ưu hóa GPU hiện tại.
+- Sử dụng cùng trạng thái ban đầu và điều kiện mô phỏng tương ứng với Baseline.
+- Lưu kết quả theo định dạng có thể đối chiếu với Baseline.
+- Đọc kết quả Baseline làm dữ liệu tham chiếu.
+- Gọi các hàm tính sai số trong `numerical_utils.cpp` thông qua Function Pointer.
+- Xuất kết quả sai số theo từng vật thể và kết quả tổng hợp.
+
+**Bước 3 — Kiểm tra tính hợp lệ**
+
+Trước khi tính sai số, xác minh số lượng vật thể, `object_id`, khối lượng, trạng thái ban đầu và các mốc thời gian tương ứng giữa hai kết quả. Không thực hiện so sánh nếu dữ liệu đầu vào hoặc trạng thái mô phỏng không tương ứng.
+
+### 8.4. Kiểm thử độ chính xác
+
+Thực hiện hai loại kiểm thử:
+
+**A. So sánh gia tốc và lực hấp dẫn**
+
+- Hai thuật toán tính toán trên cùng trạng thái vật thể.
+- So sánh gia tốc và lực hấp dẫn theo từng vật thể.
+- Không cập nhật trạng thái mô phỏng giữa hai phép tính được đối chiếu.
+
+**B. So sánh quỹ đạo theo thời gian**
+
+- Hai chương trình mô phỏng độc lập trên cùng trạng thái ban đầu.
+- Sử dụng cùng timestep và tổng số bước mô phỏng.
+- Lưu vị trí và vận tốc theo từng bước.
+- So sánh kết quả theo `object_id` và `step` để đánh giá sai số tích lũy.
+
+### 8.5. Đo lường hiệu năng
+
+Mỗi chương trình phải tự đo và lưu các chỉ số:
+
+- CPU time.
+- GPU compute time.
+- Compute time.
+- Thời gian truyền dữ liệu CPU-GPU nếu có thể đo riêng.
+- Frame time và FPS nếu có vòng lặp render thực tế.
+
+Sử dụng phương pháp đo phù hợp với kiến trúc hiện tại. Đối với GPU OpenGL, ưu tiên sử dụng GPU Timer Query để đo thời gian thực thi GPU. Không đồng nhất thời gian CPU gửi lệnh với thời gian GPU thực thi.
+
+Thực hiện warm-up trước khi đo và nhiều lượt chạy trên cùng cấu hình. Ghi nhận trung bình, trung vị và độ phân tán phù hợp. Phân biệt thời gian khởi tạo, truyền dữ liệu và tính toán khi có thể.
+
+### 8.6. Lưu trữ kết quả
+
+Tổ chức kết quả theo từng lần benchmark:
+
+```text
+benchmark_results/
+└── run_001/
+    ├── run_metadata.json
+    ├── direct/
+    │   ├── results.csv
+    │   └── performance.csv
+    ├── barnes_hut/
+    │   ├── results.csv
+    │   └── performance.csv
+    └── comparison/
+        ├── per_object_error.csv
+        ├── per_step_error.csv
+        └── summary.csv
+```
+
+Yêu cầu dữ liệu:
+
+- `results.csv`: lưu kết quả thô theo từng vật thể, bao gồm `object_id`, `step`, `time`, vị trí, vận tốc, gia tốc và lực hấp dẫn nếu có.
+- `performance.csv`: lưu các chỉ số hiệu năng của từng chương trình.
+- `per_object_error.csv`: lưu sai số của từng vật thể.
+- `per_step_error.csv`: lưu sai số tổng hợp theo từng bước mô phỏng.
+- `summary.csv`: lưu các chỉ số sai số và hiệu năng tổng hợp.
+- `run_metadata.json`: lưu cấu hình thí nghiệm, số lượng vật thể, phân bố vật thể, theta, timestep, tổng số bước, thông tin GPU và phương pháp đo.
+
+Đảm bảo dữ liệu số được lưu với độ chính xác phù hợp, tránh làm tròn quá sớm gây ảnh hưởng đến kết quả sai số.
+
+### 8.7. Hiển thị dữ liệu và kết quả trên Terminal
+
+Ngoài việc lưu dữ liệu vào các file CSV, cả hai chương trình phải in thông tin kiểm thử và kết quả tương ứng trực tiếp ra Terminal.
+
+**Chương trình Baseline:**
+- Thông tin cấu hình lần chạy và số lượng vật thể.
+- Dữ liệu kết quả của từng vật thể, bao gồm `object_id`, vị trí, vận tốc, gia tốc và lực hấp dẫn nếu có.
+- CPU time và các chỉ số hiệu năng đo được.
+- Thông báo hoàn thành và vị trí lưu file kết quả.
+
+**Chương trình Barnes–Hut:**
+- Thông tin cấu hình lần chạy, số lượng vật thể và theta.
+- Dữ liệu kết quả của từng vật thể.
+- Các kết quả so sánh với Baseline theo từng vật thể và từng bước mô phỏng.
+- Các chỉ số sai số tổng hợp: RMSE, MAPE, Max Absolute Error, Relative Error, Position RMSE và Max Position Error.
+- CPU time, GPU compute time, compute time, frame time và FPS nếu có dữ liệu đo tương ứng.
+- Thông báo hoàn thành và vị trí lưu các file kết quả.
+
+Tổ chức nội dung Terminal thành các phần rõ ràng, có tên chỉ số và đơn vị đo. Các giá trị được in ra phải thống nhất với dữ liệu được ghi trong CSV, không sử dụng dữ liệu minh họa hoặc giá trị giả.
+
+### 8.8. Phân tích kết quả
+
+Đánh giá kết quả theo hai nhóm:
+
+**Độ chính xác:**
+- RMSE và MAPE.
+- Max Absolute Error và Relative Error.
+- Position RMSE và Max Position Error.
+- Sai số gia tốc và lực hấp dẫn.
+- Sai số vị trí, vận tốc theo thời gian.
+- Ảnh hưởng của số lượng vật thể và theta đến sai số.
+
+**Hiệu năng:**
+- So sánh CPU time và GPU compute time.
+- So sánh compute time giữa hai chương trình.
+- Đánh giá frame time và FPS nếu có dữ liệu đo.
+- Phân tích thời gian thực thi theo số lượng vật thể.
+- Đánh giá chi phí truyền dữ liệu và các giai đoạn xử lý nếu đã đo riêng.
+
+### 8.9. Yêu cầu triển khai cho Copilot
+
+Thực hiện theo thứ tự:
+
+1. Kiểm tra mã nguồn hiện tại của hai chương trình và các phép tính sai số đang có.
+2. Tạo `numerical_utils.h` và `numerical_utils.cpp`; tổ chức các hàm tính sai số bằng Function Pointer.
+3. Hoàn thiện cơ chế lưu kết quả, in dữ liệu ra Terminal và đo hiệu năng của Baseline.
+4. Hoàn thiện chương trình Barnes–Hut để đọc kết quả Baseline, tính sai số, in kết quả ra Terminal và xuất báo cáo.
+5. Bổ sung các phép đo CPU/GPU phù hợp.
+6. Chạy kiểm thử với nhiều cấu hình, thu thập dữ liệu và phân tích kết quả.
+
+Không tự ý thay đổi công thức vật lý hoặc thuật toán mô phỏng hiện tại khi triển khai module đánh giá. Giữ nguyên cách tính RMSE và MAPE đang có.
+
+### 8.10. Tiêu chí hoàn thành
+
+- Hai chương trình vẫn hoạt động độc lập.
+- Baseline chạy trước và lưu được kết quả tham chiếu.
+- Chương trình Barnes–Hut chạy sau, đọc được kết quả Baseline và thực hiện so sánh.
+- Hai kết quả được xác minh có cùng điều kiện và trạng thái ban đầu.
+- Module `numerical_utils` hoạt động đúng và sử dụng Function Pointer để gọi các hàm tính sai số.
+- RMSE, MAPE và các chỉ số bổ sung được tính toán, lưu trữ chính xác.
+- Dữ liệu và kết quả được hiển thị trên Terminal.
+- Có dữ liệu sai số theo từng vật thể và theo thời gian.
+- Có dữ liệu đo hiệu năng CPU/GPU và thông tin cấu hình thí nghiệm.
+- Có thể lặp lại benchmark để đánh giá những lần tối ưu Barnes–Hut tiếp theo.
+- Báo cáo chỉ đưa ra kết luận dựa trên dữ liệu thực nghiệm.
+
+**Kết quả mong đợi:** Xây dựng được quy trình đánh giá có thể lặp lại, trong đó Baseline là chương trình tham chiếu, Barnes–Hut là chương trình được tối ưu và `numerical_utils` cung cấp phương pháp tính sai số thống nhất cho các lần kiểm thử tiếp theo.
 
 ### Giai đoạn 9 — Cập nhật tài liệu
 

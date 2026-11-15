@@ -67,6 +67,7 @@ endfunction()
 add_gravity_executable(gravity_sim_3Dgrid
     src/gravity_sim_3Dgrid.cpp
     src/gravity_sim_3Dgrid_function.cpp
+    src/numerical_utils.cpp
     src/gpu_memory_manager.cpp
     shaders/grid.vert
     shaders/grid.frag
@@ -103,6 +104,7 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
 
 add_gravity_executable(gravity_sim_3Dgrid_baseline
     src/gravity_sim_3Dgrid_baseline.cpp
+    src/numerical_utils.cpp
     shaders/grid.vert
     shaders/grid.frag
     shaders/grid.comp
@@ -120,4 +122,17 @@ add_custom_command(TARGET gravity_sim_3Dgrid_baseline POST_BUILD
 
 if(CMAKE_GENERATOR MATCHES "^Visual Studio")
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gravity_sim_3Dgrid)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(numerical_utils_test
+        tests/numerical_utils_test.cpp
+        src/numerical_utils.cpp
+    )
+    target_include_directories(numerical_utils_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_features(numerical_utils_test PRIVATE cxx_std_20)
+    add_test(NAME numerical_utils_test COMMAND numerical_utils_test)
 endif()

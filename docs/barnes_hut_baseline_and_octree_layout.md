@@ -308,3 +308,55 @@ traversal-stack overflow, or buffer-range failure. The matrix does not establish
 large-N behavior, an accuracy tolerance for all workloads, or the absence of
 rare failures beyond the tested snapshots. Its raw per-case data is stored in
 the generated CSV alongside per-pass timings and maximum acceleration errors.
+
+### Phase 8 rerun: structured accuracy and performance report
+
+The repeatable evaluator now uses `numerical_utils.h/.cpp` to compute scalar
+and vector metrics through a function-pointer table. MAPE omits reference
+components whose magnitude is at or below `1e-12`; relative error divides the
+sum of absolute errors by the greater of the summed reference magnitudes and
+the same tolerance. Vector position RMSE is
+`sqrt(sum(object_error_length^2) / object_count)`.
+
+Run `gravity_sim_3Dgrid.exe --benchmark` from a clean working directory. Each
+execution creates a unique `benchmark_results/run_<timestamp>/` containing
+`run_metadata.json`, direct and Barnes-Hut `results.csv` and `performance.csv`,
+plus `comparison/per_object_error.csv`, `per_step_error.csv`, and
+`summary.csv`. The results store IDs, step/time, mass, position, velocity,
+acceleration, and force at 17-digit precision. The matrix verifies stable IDs,
+positive finite masses, and finite initial states; the Direct and Barnes-Hut
+force rows are then matched on the same nine deterministic snapshots before
+error calculation. The trajectory test records each state for all 25 samples
+(initial state plus 24 steps).
+
+The Release rerun on 2026-11-15 used NVIDIA GeForce RTX 3050 Laptop GPU,
+OpenGL 4.4.0 (`610.62`), `G = 6.6743e-11`, `epsilon = 10`, and
+`dt = 1/96 s`. It produced 27 summary cases (3 counts x 3 distributions x 3
+theta values), with three timing repeats per case. CSV validation confirmed
+1,086 Direct and 3,258 Barnes-Hut same-snapshot force rows, 75 per-step
+trajectory summaries, valid metadata JSON, matching object IDs/masses/initial
+positions and velocities, and no NaN/Inf values.
+
+For 202 uniform objects at theta 0.3, the acceleration RMSE was `0.013442`,
+MAPE `0.6564%`, max absolute error `0.031889`, and aggregate relative error
+`0.001031`. Force RMSE/max absolute error were `2.482e21` / `7.796e21` in the
+simulation's force units. Direct GPU compute total was `0.6847 ms`; the
+Barnes-Hut total was `3.5236 ms`. At the clustered 32-object, 24-step sample,
+position RMSE/max error was `0.0004054 / 0.001007` and velocity RMSE/max error
+was `0.002436 / 0.005423` at theta 0.3. All 27 measured Barnes-Hut totals were
+slower than Direct.
+
+GPU timings use OpenGL timer queries; CPU force-dispatch timings use host
+wall-clock time around the dispatch call. Both performance CSVs report mean,
+median, and population standard deviation over the three repeats. Transfer
+time is not isolated because object SSBOs are persistently mapped; frame time
+and FPS are not measured in headless benchmark mode and are left blank rather
+than estimated.
+
+**Baseline scope:** the deterministic matrix uses the Direct N-body GPU shader
+as its same-snapshot reference within the Barnes-Hut executable. The separate
+interactive `gravity_sim_3Dgrid_baseline.exe` was built but not run as an
+independent producer/consumer in this matrix; it lacks a deterministic
+snapshot-driven export mode. Thus this run validates Direct-vs-Barnes-Hut
+GPU forces and trajectories, but does not claim that the separate-program
+baseline workflow in plan step 8.3 has been completed.
