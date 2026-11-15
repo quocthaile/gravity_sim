@@ -461,9 +461,17 @@ Chỉ dùng persistent mapping khi thực sự có yêu cầu CPU truy cập d�
 
 Đánh giá chương trình mới sử dụng Barnes–Hut kết hợp tối ưu hóa GPU so với chương trình Baseline sử dụng Direct N-body về:
 
-- Độ chính xác của gia tốc, lực hấp dẫn, vị trí và vận tốc.
+- Tính đúng đắn của quá trình Mass Aggregation, bao gồm tổng khối lượng và tâm khối của các node trong Octree.
+- Độ chính xác của gia tốc hấp dẫn khi sử dụng Barnes–Hut so với Direct N-body.
+- Độ chính xác của vị trí và vận tốc trong quá trình mô phỏng quỹ đạo.
 - Hiệu năng xử lý CPU và GPU.
-- Mức độ thay đổi sai số và thời gian thực thi theo số lượng vật thể và tham số Barnes–Hut.
+- Mức độ thay đổi sai số và thời gian thực thi theo số lượng vật thể và tham số theta.
+
+Phải phân biệt rõ ba nội dung đánh giá:
+
+1. Kiểm tra Mass Aggregation có tổng hợp chính xác khối lượng và tâm khối hay không.
+2. Kiểm tra Barnes–Hut có tính gia tốc chính xác như Direct N-body hay không.
+3. Kiểm tra sai số tích lũy trong quá trình mô phỏng độc lập của hai chương trình.
 
 Mọi kết luận về độ chính xác và hiệu năng phải dựa trên kết quả thực nghiệm, không được suy luận rằng chương trình nhanh hơn chỉ vì đã triển khai Octree, Mass Aggregation hoặc chuyển tính toán sang GPU.
 
@@ -471,20 +479,30 @@ Mọi kết luận về độ chính xác và hiệu năng phải dựa trên k�
 
 Tạo hai file dùng chung:
 
-- `numerical_utils.h`: khai báo cấu trúc dữ liệu, các hàm tính sai số và kiểu con trỏ hàm.
-- `numerical_utils.cpp`: triển khai các hàm tính toán sai số.
+- `error_utils.h`: khai báo cấu trúc dữ liệu, các hàm tính sai số và kiểu con trỏ hàm.
+- `error_utils.cpp`: triển khai các hàm tính toán sai số.
 
 Sử dụng Function Pointer để tổ chức và gọi các hàm tính sai số. Phạm vi áp dụng chỉ giới hạn trong module này, không thay đổi kiến trúc của hai chương trình mô phỏng.
 
-Giữ nguyên công thức và ý nghĩa của RMSE, MAPE hiện có. Bổ sung các chỉ số:
+Vị trí đặt hai file phải tuân theo cấu trúc mã nguồn hiện tại của dự án. Cập nhật cấu hình build tương ứng nếu cần.
+
+Tham khảo logic và giữ nguyên công thức và ý nghĩa của RMSE, MAPE hiện có trong file `numerical_error.cpp`. Bổ sung các chỉ số:
 
 - RMSE (Root Mean Square Error).
 - MAPE (Mean Absolute Percentage Error).
 - Max Absolute Error.
 - Relative Error.
-- Position RMSE.
 - Max Position Error.
 - Sai số gia tốc, lực hấp dẫn và vận tốc.
+
+Yêu cầu:
+- Giữ nguyên công thức và ý nghĩa của RMSE, MAPE đang được sử dụng trong mã nguồn hiện tại.
+- Kiểm tra các hàm tính sai số hiện có trước khi triển khai, tránh tạo các hàm trùng lặp.
+- Sử dụng Function Pointer để lựa chọn và gọi các hàm tính sai số.
+- Đối với đại lượng vector như vị trí, vận tốc và gia tốc, phải xác định rõ cách tính sai số dựa trên độ lớn vector.
+- Với MAPE và Relative Error, xử lý trường hợp giá trị tham chiếu bằng 0 hoặc gần 0. Không thực hiện phép chia gây mất ổn định số học.
+- Ghi nhận số lượng mẫu không đủ điều kiện tính sai số tương đối và ngưỡng sử dụng.
+- Lưu kết quả với độ chính xác phù hợp, không làm tròn.
 
 Các phép tính phải xác định rõ đại lượng được đánh giá. Với MAPE và Relative Error, cần xử lý trường hợp giá trị tham chiếu bằng 0 hoặc gần 0.
 
@@ -495,10 +513,10 @@ Các phép tính phải xác định rõ đại lượng được đánh giá. V
 Sử dụng `gravity_sim_3Dgrid_baseline.cpp` để chạy thuật toán Direct N-body.
 
 - Giữ nguyên thuật toán và logic mô phỏng hiện tại.
-- Lưu kết quả cần thiết để làm dữ liệu tham chiếu.
-- Lưu vị trí, vận tốc, gia tốc và lực hấp dẫn nếu có.
-- Lưu kết quả theo `object_id` và `step` để phục vụ đối chiếu.
-- Ghi lại thông tin cấu hình và hiệu năng của lần chạy.
+- Lưu kết quả vị trí, vận tốc, gia tốc và lực hấp dẫn của từng vật thể để làm dữ liệu tham chiếu.
+- Lưu kết quả theo `object_id`, `step` và `time`để phục vụ đối chiếu.
+- Lưu thông tin cấu hình và các chỉ số hiệu năng đo được.
+- Lưu kết quả làm dữ liệu tham chiếu cho chương trình Barnes–Hut.
 
 **Bước 2 — Chạy chương trình mới**
 
@@ -508,7 +526,7 @@ Sử dụng `gravity_sim_3Dgrid.cpp` để chạy thuật toán Barnes–Hut.
 - Sử dụng cùng trạng thái ban đầu và điều kiện mô phỏng tương ứng với Baseline.
 - Lưu kết quả theo định dạng có thể đối chiếu với Baseline.
 - Đọc kết quả Baseline làm dữ liệu tham chiếu.
-- Gọi các hàm tính sai số trong `numerical_utils.cpp` thông qua Function Pointer.
+- Gọi các hàm tính sai số trong `error_utils.cpp` thông qua Function Pointer.
 - Xuất kết quả sai số theo từng vật thể và kết quả tổng hợp.
 
 **Bước 3 — Kiểm tra tính hợp lệ**
@@ -546,38 +564,254 @@ Sử dụng phương pháp đo phù hợp với kiến trúc hiện tại. Đố
 
 Thực hiện warm-up trước khi đo và nhiều lượt chạy trên cùng cấu hình. Ghi nhận trung bình, trung vị và độ phân tán phù hợp. Phân biệt thời gian khởi tạo, truyền dữ liệu và tính toán khi có thể.
 
-### 8.6. Lưu trữ kết quả
+### 8.6. Kiểm thử tính đúng đắn của Mass Aggregation
 
-Tổ chức kết quả theo từng lần benchmark:
+Thực hiện kiểm tra độc lập quá trình tổng hợp khối lượng và tâm khối trong Octree.
 
-```text
-benchmark_results/
-└── run_001/
-    ├── run_metadata.json
-    ├── direct/
-    │   ├── results.csv
-    │   └── performance.csv
-    ├── barnes_hut/
-    │   ├── results.csv
-    │   └── performance.csv
-    └── comparison/
-        ├── per_object_error.csv
-        ├── per_step_error.csv
-        └── summary.csv
-```
+A. Kiểm tra tổng khối lượng của node
 
-Yêu cầu dữ liệu:
+Đối với từng node, tính lại tổng khối lượng trực tiếp từ toàn bộ vật thể thuộc node đó:
 
-- `results.csv`: lưu kết quả thô theo từng vật thể, bao gồm `object_id`, `step`, `time`, vị trí, vận tốc, gia tốc và lực hấp dẫn nếu có.
-- `performance.csv`: lưu các chỉ số hiệu năng của từng chương trình.
-- `per_object_error.csv`: lưu sai số của từng vật thể.
-- `per_step_error.csv`: lưu sai số tổng hợp theo từng bước mô phỏng.
-- `summary.csv`: lưu các chỉ số sai số và hiệu năng tổng hợp.
-- `run_metadata.json`: lưu cấu hình thí nghiệm, số lượng vật thể, phân bố vật thể, theta, timestep, tổng số bước, thông tin GPU và phương pháp đo.
+[
+M_{\text{reference}}=\sum_{i=1}^{N}m_i
+]
 
-Đảm bảo dữ liệu số được lưu với độ chính xác phù hợp, tránh làm tròn quá sớm gây ảnh hưởng đến kết quả sai số.
+Đối chiếu với kết quả tổng khối lượng do Mass Aggregation tạo ra:
 
-### 8.7. Hiển thị dữ liệu và kết quả trên Terminal
+[
+M_{\text{aggregation}}
+]
+
+Tính sai số giữa hai kết quả để xác định tính chính xác của quá trình tổng hợp.
+
+B. Kiểm tra tâm khối của node
+
+Tính lại tâm khối trực tiếp từ khối lượng và vị trí của các vật thể thuộc node:
+
+\frac{\sum_{i=1}^{N}m_i\vec{r}i}
+{\sum{i=1}^{N}m_i}
+]
+
+Đối chiếu với tâm khối được lưu trong node sau khi thực hiện Mass Aggregation.
+
+Tính sai số dựa trên độ lớn vector sai khác giữa hai kết quả.
+
+C. Kiểm tra quá trình tổng hợp từ node con lên node cha
+
+Kiểm tra kết quả Mass Aggregation tại các node lá.
+
+Kiểm tra tổng khối lượng và tâm khối của node cha được tổng hợp chính xác từ các node con.
+
+Đối chiếu kết quả của node cha với phép tính trực tiếp từ toàn bộ vật thể thuộc node đó.
+
+Kiểm tra node gốc để xác minh tổng khối lượng và tâm khối của toàn bộ hệ thống.
+
+Xác minh không xảy ra hiện tượng thiếu hoặc tính trùng vật thể trong quá trình tổng hợp.
+
+Phép tính tham chiếu phải được thực hiện độc lập từ dữ liệu vật thể gốc, không sử dụng lại kết quả Mass Aggregation để tạo dữ liệu tham chiếu.
+
+D. Lưu kết quả kiểm tra
+
+Lưu kết quả theo từng node, bao gồm:
+node_id, độ sâu của node.
+Số lượng vật thể thuộc node.
+Tổng khối lượng tham chiếu.
+Tổng khối lượng từ Mass Aggregation.
+Sai số khối lượng.
+Tâm khối tham chiếu.
+Tâm khối từ Mass Aggregation.
+Sai số tâm khối.
+Trạng thái kiểm tra.
+
+Sử dụng ngưỡng sai số tuyệt đối và tương đối phù hợp với kiểu dữ liệu dấu phẩy động đang sử dụng. Ghi lại các ngưỡng này trong metadata.
+
+Phép kiểm tra phải được thực hiện trên node lá và node cha. Không chỉ kiểm tra node gốc.
+
+Lưu ý: Phép kiểm thử này chỉ đánh giá tính đúng đắn của dữ liệu Mass Aggregation. Không sử dụng kết quả này thay thế phép so sánh sai số gia tốc Barnes–Hut.
+
+### 8.7. Kiểm thử độ chính xác của Barnes–Hut và quỹ đạo
+
+Thực hiện hai loại kiểm thử riêng biệt.
+
+A. So sánh gia tốc trên cùng trạng thái vật thể
+
+Mục đích: đánh giá sai số do cơ chế xấp xỉ Barnes–Hut so với Direct N-body.
+
+Quy trình:
+
+- Đọc trạng thái vật thể từ dữ liệu Baseline.
+- Sử dụng cùng vị trí, khối lượng và các điều kiện tính toán cho hai thuật toán.
+- Tính gia tốc tham chiếu bằng Direct N-body.
+- Xây dựng Octree, thực hiện Mass Aggregation và tính gia tốc bằng Barnes–Hut trên chính trạng thái đó.
+- So sánh gia tốc theo từng object_id.
+- Không cập nhật vị trí hoặc vận tốc giữa hai phép tính được đối chiếu.
+- Đối với mỗi vật thể, so sánh:
+
+[
+\vec{a}{\text{Direct}}
+\quad\text{và}\quad
+\vec{a}{\text{Barnes-Hut}}
+]
+
+Tính sai số gia tốc dựa trên vector sai khác:
+
+\vec{a}_{\text{Direct},i}
+\right|
+]
+
+Thực hiện kiểm thử tại các trạng thái mô phỏng tương ứng với những step được lưu trong Baseline.
+
+Lưu ý: Hai thuật toán phải nhận cùng trạng thái đầu vào. Không so sánh gia tốc tại hai trạng thái vị trí khác nhau vì điều đó sẽ không phản ánh riêng sai số của phép xấp xỉ Barnes–Hut.
+
+B. So sánh quỹ đạo theo thời gian
+
+Mục đích: đánh giá sai số tích lũy trong quá trình mô phỏng độc lập.
+
+Quy trình:
+
+- Chạy Baseline và Barnes–Hut độc lập trên cùng trạng thái ban đầu.
+- Sử dụng cùng timestep và tổng số bước mô phỏng.
+- Sử dụng cùng cấu hình vật thể và điều kiện mô phỏng.
+- Lưu vị trí và vận tốc theo từng bước.
+- So sánh kết quả theo object_id và step.
+
+Các chỉ số cần đánh giá:
+
+Position RMSE.
+Max Position Error.
+RMSE vận tốc.
+MAPE và Relative Error nếu phù hợp với đại lượng được đánh giá.
+
+Kết quả phải phản ánh được mức độ sai khác của quỹ đạo và vận tốc giữa hai chương trình qua thời gian.
+
+Không sử dụng phép so sánh quỹ đạo để thay thế phép so sánh gia tốc trên cùng trạng thái vật thể.
+
+### 8.8. Đo lường hiệu năng
+
+Mỗi chương trình phải tự đo và lưu các chỉ số hiệu năng tương ứng với kiến trúc thực tế.
+
+Các chỉ số cần thu thập:
+
+CPU time.
+GPU compute time.
+Compute time.
+Thời gian truyền dữ liệu CPU-GPU nếu có thể đo riêng.
+Frame time và FPS.
+
+Yêu cầu:
+
+- Sử dụng std::chrono::steady_clock hoặc phương pháp phù hợp để đo thời gian thực thi phía CPU.
+- Phân biệt thời gian CPU xử lý/gửi lệnh với thời gian GPU thực sự thực thi.
+- Đối với GPU OpenGL, ưu tiên sử dụng GPU Timer Query để đo thời gian thực thi GPU.
+- Không đồng nhất CPU submission time với GPU compute time.
+- Đo riêng thời gian xây dựng Octree, Mass Aggregation, tính gia tốc Direct N-body, tính gia tốc Barnes–Hut và các giai đoạn liên quan nếu có thể.
+- Phân biệt thời gian khởi tạo, truyền dữ liệu và tính toán.
+- Không tính thời gian kiểm tra sai số hoặc xuất CSV vào thời gian tính toán của thuật toán nếu mục tiêu là đo riêng hiệu năng mô phỏng.
+
+Thực hiện warm-up trước khi đo và nhiều lượt chạy trên cùng cấu hình.
+
+Với các lượt chạy, ghi nhận:
+
+Giá trị trung bình.
+Giá trị trung vị.
+Độ lệch chuẩn hoặc chỉ số phân tán phù hợp.
+
+Nếu một chương trình không có GPU compute hoặc không có vòng lặp render thực tế thì ghi N/A, không ghi giá trị 0 để đại diện cho phép đo không tồn tại.
+
+### 8.9. Lưu trữ kết quả
+
+Toàn bộ kết quả benchmark mới phải được lưu trong thư mục numerical_error/ tại thư mục gốc dự án.
+
+
+Sử dụng đường dẫn tương đối từ thư mục gốc dự án. Không lưu kết quả chính ở các thư mục tạm thời hoặc bên ngoài dự án.
+
+Tổ chức dữ liệu theo từng lần benchmark để không ghi đè kết quả của lần chạy trước.
+
+Cấu trúc đề xuất:
+
+numerical_error/
+├── barnes_hut_benchmark.csv
+├── baseline_positions.csv
+├── optimized_positions.csv
+├── position_error.csv
+│
+├── run_001/
+│   ├── run_metadata.json
+│   │
+│   ├── direct/
+│   │   ├── results.csv
+│   │   └── performance.csv
+│   │
+│   ├── barnes_hut/
+│   │   ├── results.csv
+│   │   └── performance.csv
+│   │
+│   ├── mass_aggregation/
+│   │   ├── node_validation.csv
+│   │   └── summary.csv
+│   │
+│   └── comparison/
+│       ├── acceleration_error.csv
+│       ├── per_object_error.csv
+│       ├── per_step_error.csv
+│       └── summary.csv
+│
+└── run_002/
+    └── ...
+
+Các file có chức năng:
+
+run_metadata.json
+Lưu thông tin cấu hình thí nghiệm:
+
+Run ID và thời điểm thực hiện.
+Số lượng vật thể.
+Phân bố vật thể.
+Seed khởi tạo.
+Theta.
+Timestep.
+Tổng số bước mô phỏng.
+Số lượt warm-up và benchmark.
+Ngưỡng sai số tuyệt đối và tương đối.
+Thông tin CPU, GPU, driver và phiên bản OpenGL.
+Phiên bản chương trình và thông tin build.
+Phương pháp đo hiệu năng.
+
+direct/results.csv và barnes_hut/results.csv
+Lưu kết quả thô theo từng vật thể:
+object_id.
+step.
+time.
+Vị trí X, Y, Z.
+Vận tốc X, Y, Z.
+Gia tốc X, Y, Z.
+
+direct/performance.csv và barnes_hut/performance.csv
+Lưu các chỉ số hiệu năng của từng chương trình và từng lượt chạy.
+
+mass_aggregation/node_validation.csv
+Lưu kết quả kiểm tra tổng khối lượng và tâm khối của từng node.
+
+mass_aggregation/summary.csv
+Lưu kết quả tổng hợp kiểm tra Mass Aggregation, bao gồm số node kiểm tra, số node đạt yêu cầu, số node không đạt và sai số lớn nhất.
+
+comparison/acceleration_error.csv
+Lưu kết quả so sánh gia tốc Direct N-body và Barnes–Hut trên cùng trạng thái vật thể.
+
+comparison/per_object_error.csv
+Lưu sai số của từng vật thể.
+
+comparison/per_step_error.csv
+Lưu sai số tổng hợp theo từng bước mô phỏng.
+
+comparison/summary.csv
+Lưu các chỉ số sai số và hiệu năng tổng hợp.
+
+Đối với các file đã tồn tại ở thư mục numerical_error/, phải kiểm tra nội dung và cấu trúc hiện tại trước khi chỉnh sửa. Không tự ý xóa, ghi đè hoặc thay đổi dữ liệu benchmark cũ. Chỉ bổ sung dữ liệu vào file hiện tại nếu cấu trúc và ý nghĩa các cột tương thích; nếu không, tạo file hoặc thư mục kết quả mới.
+
+Đảm bảo dữ liệu số được lưu với độ chính xác phù hợp, tránh làm tròn gây ảnh hưởng đến kết quả sai số.
+
+### 8.10. Hiển thị dữ liệu và kết quả trên Terminal
 
 Ngoài việc lưu dữ liệu vào các file CSV, cả hai chương trình phải in thông tin kiểm thử và kết quả tương ứng trực tiếp ra Terminal.
 
@@ -597,9 +831,28 @@ Ngoài việc lưu dữ liệu vào các file CSV, cả hai chương trình ph�
 
 Tổ chức nội dung Terminal thành các phần rõ ràng, có tên chỉ số và đơn vị đo. Các giá trị được in ra phải thống nhất với dữ liệu được ghi trong CSV, không sử dụng dữ liệu minh họa hoặc giá trị giả.
 
-### 8.8. Phân tích kết quả
+### 8.11. Phân tích kết quả
 
-Đánh giá kết quả theo hai nhóm:
+**A. Tính đúng đắn của Mass Aggregation**
+
+Sai số tổng khối lượng của từng node.
+Sai số tâm khối của từng node.
+Tính đúng đắn của quá trình tổng hợp từ node con lên node cha.
+Số node đạt và không đạt yêu cầu.
+Sai số lớn nhất của toàn bộ Octree.
+
+Mục đích là xác minh dữ liệu khối lượng và tâm khối được tổng hợp chính xác trước khi sử dụng cho Barnes–Hut.
+
+**B. Độ chính xác của Barnes–Hut**
+
+RMSE và MAPE của gia tốc.
+Max Absolute Error và Relative Error.
+Sai số gia tốc theo từng vật thể.
+Ảnh hưởng của số lượng vật thể và theta đến sai số.
+
+Mục đích là đánh giá mức độ sai khác giữa gia tốc tính bằng Barnes–Hut và Direct N-body trên cùng trạng thái đầu vào.
+
+**C. Phân tích hiệu năng**
 
 **Độ chính xác:**
 - RMSE và MAPE.
@@ -616,16 +869,20 @@ Tổ chức nội dung Terminal thành các phần rõ ràng, có tên chỉ s�
 - Phân tích thời gian thực thi theo số lượng vật thể.
 - Đánh giá chi phí truyền dữ liệu và các giai đoạn xử lý nếu đã đo riêng.
 
-### 8.9. Yêu cầu triển khai cho Copilot
+### 8.12. Yêu cầu triển khai cho Copilot
 
 Thực hiện theo thứ tự:
 
 1. Kiểm tra mã nguồn hiện tại của hai chương trình và các phép tính sai số đang có.
-2. Tạo `numerical_utils.h` và `numerical_utils.cpp`; tổ chức các hàm tính sai số bằng Function Pointer.
-3. Hoàn thiện cơ chế lưu kết quả, in dữ liệu ra Terminal và đo hiệu năng của Baseline.
-4. Hoàn thiện chương trình Barnes–Hut để đọc kết quả Baseline, tính sai số, in kết quả ra Terminal và xuất báo cáo.
-5. Bổ sung các phép đo CPU/GPU phù hợp.
-6. Chạy kiểm thử với nhiều cấu hình, thu thập dữ liệu và phân tích kết quả.
+2. Kiểm tra nội dung hiện tại của thư mục numerical_error/ để xác định cấu trúc dữ liệu và tránh ghi đè kết quả cũ.
+3. Tạo `error_utils.h` và `error_utils.cpp`; tổ chức các hàm tính sai số bằng Function Pointer.
+4. Hoàn thiện cơ chế lưu kết quả, in dữ liệu ra Terminal và đo hiệu năng của Baseline.
+5. Hoàn thiện chương trình Barnes–Hut để đọc kết quả Baseline, tính sai số, in kết quả ra Terminal và xuất báo cáo.
+6. Triển khai kiểm tra độc lập Mass Aggregation, bao gồm tổng khối lượng và tâm khối của node.
+7. Triển khai so sánh gia tốc và so sánh quỹ đạo.
+8. Bổ sung xuất kết quả ra Terminal và CSV.
+9. Thực hiện đo lường hiệu năng CPU/GPU phù hợp với kiến trúc hiện tại.
+10. Chạy kiểm thử với nhiều cấu hình, thu thập dữ liệu và phân tích kết quả.
 
 Không tự ý thay đổi công thức vật lý hoặc thuật toán mô phỏng hiện tại khi triển khai module đánh giá. Giữ nguyên cách tính RMSE và MAPE đang có.
 

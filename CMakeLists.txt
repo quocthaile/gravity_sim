@@ -67,7 +67,7 @@ endfunction()
 add_gravity_executable(gravity_sim_3Dgrid
     src/gravity_sim_3Dgrid.cpp
     src/gravity_sim_3Dgrid_function.cpp
-    src/numerical_utils.cpp
+    src/error_utils.cpp
     src/gpu_memory_manager.cpp
     shaders/grid.vert
     shaders/grid.frag
@@ -104,7 +104,6 @@ add_custom_command(TARGET gravity_sim_3Dgrid POST_BUILD
 
 add_gravity_executable(gravity_sim_3Dgrid_baseline
     src/gravity_sim_3Dgrid_baseline.cpp
-    src/numerical_utils.cpp
     shaders/grid.vert
     shaders/grid.frag
     shaders/grid.comp
@@ -126,13 +125,13 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(numerical_utils_test
-        tests/numerical_utils_test.cpp
-        src/numerical_utils.cpp
+    add_executable(error_utils_test
+        tests/error_utils_test.cpp
+        src/error_utils.cpp
     )
-    target_include_directories(numerical_utils_test PRIVATE
+    target_include_directories(error_utils_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    target_compile_features(numerical_utils_test PRIVATE cxx_std_20)
-    add_test(NAME numerical_utils_test COMMAND numerical_utils_test)
+    target_compile_features(error_utils_test PRIVATE cxx_std_20)
+    add_test(NAME error_utils_test COMMAND error_utils_test)
 endif()

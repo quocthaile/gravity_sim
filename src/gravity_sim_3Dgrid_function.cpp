@@ -1,10 +1,11 @@
 #include "gravity_sim_3Dgrid_function.hpp"
-#include "numerical_utils.h"
+#include "error_utils.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <filesystem>
 #include <functional>
@@ -13,10 +14,9 @@
 #include <limits>
 #include <numeric>
 #include <random>
-#include <set>
 #include <sstream>
 #include <stdexcept>
-#include <ctime>
+#include <thread>
 
 void SavePositions(const char *filename, const std::vector<std::vector<glm::vec3>> &positions,
                    double dt)
@@ -1838,35 +1838,33 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
     };
 
     const auto calculateErrors = [&](const std::vector<GpuObjectAcceleration> &reference,
-                                     const std::vector<GpuObjectAcceleration> &actual,
                                      std::size_t count)
     {
-        double squaredRelativeError = 0.0;
-        double maximumRelativeError = 0.0;
-        std::vector<numerical::VectorPair> samples;
+        std::vector<error_utils::VectorSample> samples;
         samples.reserve(count);
         for (std::size_t index = 0; index < count; ++index)
         {
             const glm::vec3 expected = reference[index].acceleration;
-            const glm::vec3 observed = actual[index].acceleration;
-            const double absoluteError = glm::length(observed - expected);
-            const double referenceMagnitude = glm::length(expected);
-            const double relativeError =
-                absoluteError / std::max(referenceMagnitude, 1.0e-12);
-            squaredRelativeError += relativeError * relativeError;
-            maximumRelativeError = std::max(maximumRelativeError, relativeError);
+            const glm::vec3 actual = accelerations[index].acceleration;
             samples.push_back({{expected.x, expected.y, expected.z},
-                               {observed.x, observed.y, observed.z}});
+                               {actual.x, actual.y, actual.z}});
         }
-        const numerical::VectorErrorMetrics metrics =
-            numerical::CalculateVectorMetrics(samples, 1.0e-12);
-        const double countAsDouble = static_cast<double>(count);
-        return std::array<double, 4>{
-            metrics.positionRmse,
-            std::sqrt(squaredRelativeError / countAsDouble),
-            metrics.maxPositionError,
-            maximumRelativeError,
-        };
+        return error_utils::CalculateVectorMetrics(samples, 1.0e-12);
+    };
+    const auto calculateForceErrors = [&](const std::vector<GpuObjectAcceleration> &reference,
+                                          std::size_t count)
+    {
+        std::vector<error_utils::VectorSample> samples;
+        samples.reserve(count);
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const double mass = physical[index].massDensity.x;
+            const glm::vec3 expected = reference[index].acceleration * static_cast<float>(mass);
+            const glm::vec3 actual = accelerations[index].acceleration * static_cast<float>(mass);
+            samples.push_back({{expected.x, expected.y, expected.z},
+                               {actual.x, actual.y, actual.z}});
+        }
+        return error_utils::CalculateVectorMetrics(samples, 1.0e-12);
     };
 
     struct TimingAverage
@@ -1890,26 +1888,12 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
     std::sort(objectCounts.begin(), objectCounts.end());
     objectCounts.erase(std::unique(objectCounts.begin(), objectCounts.end()), objectCounts.end());
 
-    std::filesystem::create_directories("numerical_error");
-    std::ofstream report("numerical_error/barnes_hut_benchmark.csv", std::ios::trunc);
-    if (!report)
-    {
-        throw std::runtime_error("Unable to create numerical_error/barnes_hut_benchmark.csv");
-    }
-    report << "renderer,version,distribution,object_count,theta,repeat_count,"
-              "rms_absolute_acceleration_error,rms_relative_acceleration_error,"
-              "max_absolute_acceleration_error,max_relative_acceleration_error,"
-              "bounds_ms,construction_ms,mass_aggregation_ms,direct_nbody_ms,barnes_hut_ms,"
-              "collision_ms,integration_ms,grid_ms,direct_total_ms,barnes_hut_total_ms,"
-              "trajectory_steps,trajectory_time_seconds,rms_position_error,max_position_error\n";
-    report << std::setprecision(10);
-
-    const std::string renderer(reinterpret_cast<const char *>(glGetString(GL_RENDERER)));
-    const std::string version(reinterpret_cast<const char *>(glGetString(GL_VERSION)));
     const auto systemNow = std::chrono::system_clock::now();
     const auto now = std::chrono::system_clock::to_time_t(systemNow);
-    const auto epochMilliseconds =
-        std::chrono::duration_cast<std::chrono::milliseconds>(systemNow.time_since_epoch()).count();
+    const auto milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(systemNow.time_since_epoch())
+            .count() %
+        1000;
     std::tm localTime{};
 #ifdef _WIN32
     localtime_s(&localTime, &now);
@@ -1917,69 +1901,101 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
     localtime_r(&now, &localTime);
 #endif
     std::ostringstream runName;
-    runName << "run_" << std::put_time(&localTime, "%Y%m%d_%H%M%S") << '_'
-            << (epochMilliseconds % 1000);
-    const std::filesystem::path runDirectory =
-        std::filesystem::path("benchmark_results") / runName.str();
-    for (const char *directory : {"direct", "barnes_hut", "comparison"})
+    runName << "run_" << std::put_time(&localTime, "%Y%m%d_%H%M%S") << '_' << milliseconds;
+    const std::string baseRunId = runName.str();
+    std::filesystem::create_directories("numerical_error");
+    std::filesystem::path runDirectory;
+    std::string runId;
+    for (std::size_t suffix = 0;; ++suffix)
     {
-        std::filesystem::create_directories(runDirectory / directory);
+        runId = baseRunId + (suffix == 0 ? "" : "_" + std::to_string(suffix));
+        runDirectory = std::filesystem::path("numerical_error") / runId;
+        if (std::filesystem::create_directory(runDirectory))
+        {
+            break;
+        }
+        if (!std::filesystem::exists(runDirectory))
+        {
+            throw std::runtime_error("Unable to create benchmark run directory: " +
+                                     runDirectory.string());
+        }
     }
+    std::filesystem::create_directory(runDirectory / "comparison");
+    std::filesystem::create_directory(runDirectory / "mass_aggregation");
 
-    std::ofstream directResults(runDirectory / "direct" / "results.csv");
-    std::ofstream directPerformance(runDirectory / "direct" / "performance.csv");
-    std::ofstream barnesHutResults(runDirectory / "barnes_hut" / "results.csv");
-    std::ofstream barnesHutPerformance(runDirectory / "barnes_hut" / "performance.csv");
-    std::ofstream perObjectErrors(runDirectory / "comparison" / "per_object_error.csv");
+    std::ofstream report(runDirectory / "comparison" / "summary.csv");
+    std::ofstream perObjectErrors(runDirectory / "comparison" / "acceleration_error.csv");
+    std::ofstream trajectoryErrors(runDirectory / "comparison" / "trajectory_error.csv");
     std::ofstream perStepErrors(runDirectory / "comparison" / "per_step_error.csv");
-    std::ofstream summary(runDirectory / "comparison" / "summary.csv");
+    std::ofstream performance(runDirectory / "performance.csv");
+    std::ofstream nodeValidation(runDirectory / "mass_aggregation" / "node_validation.csv");
+    std::ofstream massSummary(runDirectory / "mass_aggregation" / "summary.csv");
     std::ofstream metadata(runDirectory / "run_metadata.json");
-    if (!directResults || !directPerformance || !barnesHutResults || !barnesHutPerformance ||
-        !perObjectErrors || !perStepErrors || !summary || !metadata)
+    if (!report || !perObjectErrors || !trajectoryErrors || !perStepErrors || !performance ||
+        !nodeValidation || !massSummary || !metadata)
     {
         throw std::runtime_error("Unable to create one or more benchmark result files");
     }
-    constexpr const char *resultHeader =
-        "distribution,object_count,object_id,step,time_seconds,theta,mass,"
-        "position_x,position_y,position_z,velocity_x,velocity_y,velocity_z,"
-        "acceleration_x,acceleration_y,acceleration_z,force_x,force_y,force_z,phase\n";
-    directResults << resultHeader;
-    barnesHutResults << resultHeader;
-    directPerformance << "distribution,object_count,repeat_count,cpu_force_dispatch_mean_ms,"
-                          "cpu_force_dispatch_median_ms,cpu_force_dispatch_stddev_ms,"
-                          "gpu_force_mean_ms,gpu_force_median_ms,gpu_force_stddev_ms,"
-                          "gpu_compute_total_ms,transfer_ms,frame_time_ms,fps\n";
-    barnesHutPerformance << "distribution,object_count,theta,repeat_count,"
-                            "cpu_force_dispatch_mean_ms,cpu_force_dispatch_median_ms,"
-                            "cpu_force_dispatch_stddev_ms,gpu_compute_mean_ms,"
-                            "gpu_compute_median_ms,gpu_compute_stddev_ms,"
-                            "gpu_compute_total_ms,transfer_ms,frame_time_ms,fps\n";
-    perObjectErrors << "comparison,distribution,object_count,theta,step,object_id,"
-                        "acceleration_error,acceleration_relative_error,force_error,"
-                        "force_relative_error,position_error,velocity_error\n";
-    perStepErrors << "comparison,distribution,object_count,theta,step,time_seconds,"
-                      "position_rmse,max_position_error,velocity_rmse,max_velocity_error\n";
-    summary << "distribution,object_count,theta,acceleration_rmse,acceleration_mape,"
-               "acceleration_max_absolute_error,acceleration_relative_error,"
-               "force_rmse,force_mape,force_max_absolute_error,force_relative_error,"
-               "position_rmse,max_position_error,trajectory_steps,"
-               "direct_gpu_compute_total_ms,barnes_hut_gpu_compute_total_ms\n";
-    for (std::ofstream *stream : {&directResults, &directPerformance, &barnesHutResults,
-                                  &barnesHutPerformance, &perObjectErrors, &perStepErrors,
-                                  &summary})
-    {
-        *stream << std::setprecision(17);
-    }
+    report << "renderer,version,distribution,seed,object_count,theta,repeat_count,"
+              "acceleration_vector_rmse,acceleration_mape_percent,"
+              "max_acceleration_error,acceleration_relative_error,"
+    "acceleration_relative_error_excluded_samples,force_vector_rmse,"
+    "force_mape_percent,max_force_error,force_relative_error,"
+    "force_relative_error_excluded_samples,"
+              "bounds_ms,construction_ms,mass_aggregation_ms,direct_nbody_ms,barnes_hut_ms,"
+              "collision_ms,integration_ms,grid_ms,direct_total_ms,barnes_hut_total_ms,"
+              "trajectory_steps,trajectory_time_seconds,rms_position_error,max_position_error,"
+              "rms_velocity_error,max_velocity_error\n";
+    perObjectErrors
+        << "distribution,seed,object_count,theta,repeat,object_id,acceleration_error,"
+           "acceleration_relative_error,force_error,force_relative_error\n";
+    trajectoryErrors << "distribution,object_count,theta,step,time_seconds,object_id,"
+                        "position_error,velocity_error\n";
+    perStepErrors << "distribution,object_count,theta,step,time_seconds,position_rmse,"
+                      "max_position_error,velocity_rmse,max_velocity_error\n";
+    performance << "algorithm,pass,distribution,object_count,theta,repeat_count,"
+                   "gpu_mean_ms,gpu_median_ms,gpu_stddev_ms,cpu_submission_ms,"
+                   "transfer_ms,frame_time_ms,fps\n";
+    nodeValidation << "distribution,object_count,node_id,depth,object_count_in_node,"
+                      "reference_mass,aggregated_mass,mass_absolute_error,mass_relative_error,"
+                      "reference_com_x,reference_com_y,reference_com_z,aggregated_com_x,"
+                      "aggregated_com_y,aggregated_com_z,com_error,passed\n";
+    massSummary << "distribution,object_count,node_count,passed_nodes,failed_nodes,"
+                   "max_mass_relative_error,max_com_error\n";
+    report << std::setprecision(17);
+    perObjectErrors << std::setprecision(17);
+    trajectoryErrors << std::setprecision(17);
+    perStepErrors << std::setprecision(17);
+    performance << std::setprecision(17);
+    nodeValidation << std::setprecision(17);
+    massSummary << std::setprecision(17);
+
+    const std::string renderer(reinterpret_cast<const char *>(glGetString(GL_RENDERER)));
+    const std::string version(reinterpret_cast<const char *>(glGetString(GL_VERSION)));
+    constexpr std::size_t timingRepeats = 3;
+    constexpr std::size_t trajectorySteps = 24;
+    const double trajectorySeconds = trajectorySteps * timeStep;
+    bool trajectoryWritten = false;
+    std::array<double, thetaValues.size()> trajectoryRmsPositionErrors{};
+    std::array<double, thetaValues.size()> trajectoryMaximumPositionErrors{};
+    std::array<double, thetaValues.size()> trajectoryRmsVelocityErrors{};
+    std::array<double, thetaValues.size()> trajectoryMaximumVelocityErrors{};
     metadata << std::setprecision(17)
              << "{\n"
-             << "  \"run_id\": \"" << runName.str() << "\",\n"
+             << "  \"run_id\": \"" << runId << "\",\n"
              << "  \"renderer\": \"" << renderer << "\",\n"
              << "  \"opengl_version\": \"" << version << "\",\n"
+             << "  \"cpu_logical_threads\": " << std::thread::hardware_concurrency() << ",\n"
              << "  \"gravitational_constant\": " << kGravitationalConstant << ",\n"
              << "  \"epsilon\": " << epsilon << ",\n"
              << "  \"time_step_seconds\": " << timeStep << ",\n"
-             << "  \"timing_repeats\": 3,\n"
-             << "  \"trajectory_steps\": 24,\n"
+             << "  \"timing_repeats\": " << timingRepeats << ",\n"
+             << "  \"trajectory_steps\": " << trajectorySteps << ",\n"
+             << "  \"relative_error_zero_tolerance\": 1e-12,\n"
+             << "  \"snapshot_seed_policy\": \"101 + object_count * 17 + distribution_index * 131; trajectory seed 918273\",\n"
+             << "  \"mass_relative_tolerance\": 1e-5,\n"
+             << "  \"center_of_mass_absolute_tolerance\": 1e-3,\n"
+             << "  \"center_of_mass_relative_tolerance\": 1e-5,\n"
              << "  \"distributions\": [\"uniform\", \"clustered\", \"disk\"],\n"
              << "  \"theta_values\": [0.3, 0.5, 0.8],\n"
              << "  \"object_counts\": [";
@@ -1990,58 +2006,174 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
     metadata << "],\n"
              << "  \"force_reference\": \"Direct N-body GPU shader on identical snapshot\",\n"
              << "  \"gpu_timing_method\": \"OpenGL GL_TIME_ELAPSED query per dispatch including required barrier\",\n"
-             << "  \"cpu_timing_method\": \"Host wall-clock around compute dispatch calls\",\n"
-             << "  \"transfer_timing\": \"not isolated; persistently mapped coherent SSBOs\",\n"
-             << "  \"frame_time_and_fps\": \"not measured by headless benchmark mode\"\n"
+             << "  \"cpu_submission_timing\": \"N/A; not isolated by this benchmark\",\n"
+             << "  \"transfer_timing\": \"N/A; persistent SSBO transfers are not isolated\",\n"
+             << "  \"frame_time_and_fps\": \"N/A in non-interactive benchmark mode\"\n"
              << "}\n";
-
-    const auto writeResultRow = [](std::ostream &stream, const std::string &distribution,
-                                   std::size_t count, std::uint32_t objectId, std::size_t step,
-                                   double simulationTime, double theta, float mass,
-                                   const GpuObjectState &state, const glm::vec3 &acceleration,
-                                   const char *phase)
+    if (!metadata.good())
     {
-        const double forceX = static_cast<double>(acceleration.x) * mass;
-        const double forceY = static_cast<double>(acceleration.y) * mass;
-        const double forceZ = static_cast<double>(acceleration.z) * mass;
-        stream << distribution << ',' << count << ',' << objectId << ',' << step << ','
-               << simulationTime << ',';
-        if (std::isfinite(theta))
-        {
-            stream << theta;
-        }
-        stream << ',' << mass << ',' << state.position.x << ',' << state.position.y << ','
-               << state.position.z << ',' << state.velocity.x << ',' << state.velocity.y << ','
-               << state.velocity.z << ',' << acceleration.x << ',' << acceleration.y << ','
-               << acceleration.z << ',' << forceX << ',' << forceY << ',' << forceZ << ','
-               << phase << '\n';
-    };
-    const auto timingStatistics = [](const std::vector<double> &samples)
+        throw std::runtime_error("Failed while writing benchmark metadata");
+    }
+
+    const auto readBenchmarkBuffer = []<typename T>(BufferRole role, std::size_t count)
     {
-        std::vector<double> ordered = samples;
-        std::sort(ordered.begin(), ordered.end());
-        const double mean = std::accumulate(ordered.begin(), ordered.end(), 0.0) /
-                            static_cast<double>(ordered.size());
-        const double median =
-            ordered.size() % 2 == 0
-                ? (ordered[ordered.size() / 2 - 1] + ordered[ordered.size() / 2]) / 2.0
-                : ordered[ordered.size() / 2];
-        double squaredDeviation = 0.0;
-        for (double value : ordered)
+        std::vector<T> values(count);
+        const GLuint buffer = gpuMemoryManager.Get(role).Handle();
+        glBindBuffer(GL_COPY_READ_BUFFER, buffer);
+        glGetBufferSubData(GL_COPY_READ_BUFFER, 0,
+                           static_cast<GLsizeiptr>(count * sizeof(T)), values.data());
+        glBindBuffer(GL_COPY_READ_BUFFER, 0);
+        return values;
+    };
+    const auto validateMassAggregates = [&](const std::string &distribution,
+                                            std::size_t count)
+    {
+        GpuOctreeMetadata treeMetadata{};
+        const GLuint metadataBuffer =
+            gpuMemoryManager.Get(BufferRole::OctreeMetadata).Handle();
+        glBindBuffer(GL_COPY_READ_BUFFER, metadataBuffer);
+        glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(treeMetadata), &treeMetadata);
+        glBindBuffer(GL_COPY_READ_BUFFER, 0);
+        const auto nodes =
+            readBenchmarkBuffer.template operator()<GpuOctreeNode>(
+                BufferRole::OctreeNodes, treeMetadata.counts.y);
+        const auto aggregates =
+            readBenchmarkBuffer.template operator()<GpuMassAggregate>(
+                BufferRole::MassField, treeMetadata.counts.y);
+        const auto objectIndices =
+            readBenchmarkBuffer.template operator()<GpuObjectIndex>(
+                BufferRole::ObjectIndexList, treeMetadata.counts.x);
+        std::size_t passedNodes = 0;
+        std::size_t failedNodes = 0;
+        double maximumMassRelativeError = 0.0;
+        double maximumCenterError = 0.0;
+
+        for (std::size_t nodeIndex = 0; nodeIndex < nodes.size(); ++nodeIndex)
         {
-            const double deviation = value - mean;
-            squaredDeviation += deviation * deviation;
+            std::vector<std::uint32_t> descendants;
+            std::function<void(std::uint32_t)> collectObjects = [&](std::uint32_t currentIndex)
+            {
+                if (currentIndex >= nodes.size())
+                {
+                    throw std::runtime_error("Mass validation found an invalid child index");
+                }
+                const GpuOctreeNode &node = nodes[currentIndex];
+                if ((node.links.w & kOctreeNodeFlagLeaf) != 0u)
+                {
+                    const std::size_t first = node.range.x;
+                    const std::size_t leafCount = node.range.y;
+                    if (first > objectIndices.size() ||
+                        leafCount > objectIndices.size() - first)
+                    {
+                        throw std::runtime_error("Mass validation found an invalid leaf range");
+                    }
+                    for (std::size_t offset = 0; offset < leafCount; ++offset)
+                    {
+                        descendants.push_back(objectIndices[first + offset]);
+                    }
+                    return;
+                }
+                for (std::uint32_t child = 0; child < node.links.y; ++child)
+                {
+                    collectObjects(node.links.x + child);
+                }
+            };
+
+            collectObjects(static_cast<std::uint32_t>(nodeIndex));
+
+            double referenceMass = 0.0;
+            double weightedX = 0.0;
+            double weightedY = 0.0;
+            double weightedZ = 0.0;
+            for (std::uint32_t objectIndex : descendants)
+            {
+                if (objectIndex >= count)
+                {
+                    throw std::runtime_error("Mass validation found an invalid object index");
+                }
+                const double mass = physical[objectIndex].massDensity.x;
+                const glm::vec3 position = currentState[objectIndex].position;
+                referenceMass += mass;
+                weightedX += mass * position.x;
+                weightedY += mass * position.y;
+                weightedZ += mass * position.z;
+            }
+            const glm::dvec3 referenceCenter =
+                referenceMass == 0.0
+                    ? glm::dvec3(0.0)
+                    : glm::dvec3(weightedX, weightedY, weightedZ) / referenceMass;
+            const glm::vec4 aggregate = aggregates[nodeIndex].centerMass;
+            const double massError = std::abs(static_cast<double>(aggregate.w) - referenceMass);
+            const double massRelativeError =
+                referenceMass == 0.0 ? massError : massError / std::abs(referenceMass);
+            const glm::dvec3 aggregateCenter(aggregate.x, aggregate.y, aggregate.z);
+            const double centerError = glm::length(aggregateCenter - referenceCenter);
+            const double centerTolerance =
+                1.0e-3 + 1.0e-5 * glm::length(referenceCenter);
+            const bool passed =
+                std::isfinite(massRelativeError) && std::isfinite(centerError) &&
+                massRelativeError <= 1.0e-5 && centerError <= centerTolerance;
+            maximumMassRelativeError = std::max(maximumMassRelativeError, massRelativeError);
+            maximumCenterError = std::max(maximumCenterError, centerError);
+            passed ? ++passedNodes : ++failedNodes;
+            nodeValidation << distribution << ',' << count << ',' << nodeIndex << ','
+                           << nodes[nodeIndex].range.z << ',' << descendants.size() << ','
+                           << referenceMass << ',' << aggregate.w << ',' << massError << ','
+                           << massRelativeError << ',' << referenceCenter.x << ','
+                           << referenceCenter.y << ',' << referenceCenter.z << ','
+                           << aggregate.x << ',' << aggregate.y << ',' << aggregate.z << ','
+                           << centerError << ',' << (passed ? "PASS" : "FAIL") << '\n';
         }
-        return std::array<double, 3>{
-            mean, median, std::sqrt(squaredDeviation / static_cast<double>(ordered.size()))};
+        massSummary << distribution << ',' << count << ',' << nodes.size() << ',' << passedNodes
+                    << ',' << failedNodes << ',' << maximumMassRelativeError << ','
+                    << maximumCenterError << '\n';
+        if (failedNodes != 0)
+        {
+            throw std::runtime_error("Mass aggregation validation failed for one or more nodes");
+        }
     };
 
-    constexpr std::size_t timingRepeats = 3;
-    constexpr std::size_t trajectorySteps = 24;
-    const double trajectorySeconds = trajectorySteps * timeStep;
-    bool trajectoryWritten = false;
-    std::array<double, thetaValues.size()> trajectoryRmsPositionErrors{};
-    std::array<double, thetaValues.size()> trajectoryMaximumPositionErrors{};
+    struct TimingStatistics
+    {
+        double mean = 0.0;
+        double median = 0.0;
+        double standardDeviation = 0.0;
+    };
+    const auto summarizeTimings = [](const std::vector<double> &samples)
+    {
+        if (samples.empty())
+        {
+            throw std::invalid_argument("Cannot summarize an empty timing sample");
+        }
+        TimingStatistics result;
+        result.mean = std::accumulate(samples.begin(), samples.end(), 0.0) /
+                      static_cast<double>(samples.size());
+        std::vector<double> sortedSamples = samples;
+        std::sort(sortedSamples.begin(), sortedSamples.end());
+        const std::size_t middle = sortedSamples.size() / 2;
+        result.median = sortedSamples.size() % 2 == 0
+                            ? (sortedSamples[middle - 1] + sortedSamples[middle]) * 0.5
+                            : sortedSamples[middle];
+        double squaredDifferences = 0.0;
+        for (double sample : samples)
+        {
+            const double difference = sample - result.mean;
+            squaredDifferences += difference * difference;
+        }
+        result.standardDeviation =
+            std::sqrt(squaredDifferences / static_cast<double>(samples.size()));
+        return result;
+    };
+    const auto writePerformanceRow = [&](const char *algorithm, const char *pass,
+                                         const std::string &distribution, std::size_t count,
+                                         const char *theta,
+                                         const std::vector<double> &samples)
+    {
+        const TimingStatistics stats = summarizeTimings(samples);
+        performance << algorithm << ',' << pass << ',' << distribution << ',' << count << ','
+                    << theta << ',' << samples.size() << ',' << stats.mean << ',' << stats.median
+                    << ',' << stats.standardDeviation << ",N/A,N/A,N/A,N/A\n";
+    };
 
     try
     {
@@ -2051,10 +2183,10 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                  distributionIndex < distributions.size(); ++distributionIndex)
             {
                 const std::string distribution = distributions[distributionIndex];
+                const std::uint32_t snapshotSeed =
+                    static_cast<std::uint32_t>(101u + count * 17u + distributionIndex * 131u);
                 BenchmarkSnapshot snapshot =
-                    makeSnapshot(count, distribution,
-                                 static_cast<std::uint32_t>(101u + count * 17u +
-                                                            distributionIndex * 131u));
+                    makeSnapshot(count, distribution, snapshotSeed);
                 uploadSnapshot(snapshot);
 
                 RunOctreeConstruction(programs.boundingBoxCompute, programs.octreeBuildCompute,
@@ -2062,6 +2194,7 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                 validateOctreeStatus();
                 RunMassAggregation(programs.massAggregationCompute, count);
                 validateOctreeStatus();
+                validateMassAggregates(distribution, count);
                 RunNBodyCompute(programs.nbodyCompute, locations, count, epsilon);
                 RunCollisionCompute(programs.collisionCompute, locations, count);
                 RunIntegration(programs.integrateCompute, locations, count, false, timeStep);
@@ -2073,19 +2206,20 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                 }
 
                 TimingAverage timing;
+                struct TimingSamples
+                {
+                    std::vector<double> bounds;
+                    std::vector<double> construction;
+                    std::vector<double> aggregation;
+                    std::vector<double> direct;
+                    std::vector<double> collision;
+                    std::vector<double> integration;
+                    std::vector<double> grid;
+                } timingSamples;
                 std::array<double, thetaValues.size()> barnesHutTimings{};
-                std::vector<double> directCpuSamples;
-                std::vector<double> directGpuSamples;
-                std::array<std::vector<double>, thetaValues.size()> barnesHutCpuSamples;
-                std::array<std::vector<double>, thetaValues.size()> barnesHutGpuSamples;
-                std::array<std::array<double, 4>, thetaValues.size()> errors{};
-                std::array<numerical::VectorErrorMetrics, thetaValues.size()>
-                    accelerationSummaryMetrics{};
-                std::array<numerical::VectorErrorMetrics, thetaValues.size()>
-                    forceSummaryMetrics{};
-                std::vector<GpuObjectAcceleration> directAcceleration;
-                std::array<std::vector<GpuObjectAcceleration>, thetaValues.size()>
-                    barnesHutAccelerations;
+                std::array<std::vector<double>, thetaValues.size()> barnesHutTimingSamples;
+                std::array<error_utils::VectorErrorMetrics, thetaValues.size()> errors{};
+                std::array<error_utils::VectorErrorMetrics, thetaValues.size()> forceErrors{};
                 for (std::size_t repeat = 0; repeat < timingRepeats; ++repeat)
                 {
                     float boundsMs = 0.0f;
@@ -2098,15 +2232,9 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                     RunOctreeConstruction(programs.boundingBoxCompute, programs.octreeBuildCompute,
                                           locations, count, &boundsMs, &constructionMs);
                     RunMassAggregation(programs.massAggregationCompute, count, &aggregationMs);
-                    const auto directCpuStart = std::chrono::steady_clock::now();
                     RunNBodyCompute(programs.nbodyCompute, locations, count, epsilon, &directMs);
-                    const double directCpuElapsed =
-                        std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - directCpuStart)
-                            .count();
-                    directCpuSamples.push_back(directCpuElapsed);
-                    directGpuSamples.push_back(directMs);
-                    directAcceleration.assign(accelerations, accelerations + count);
+                    std::vector<GpuObjectAcceleration> directAcceleration(
+                        accelerations, accelerations + count);
                     RunCollisionCompute(programs.collisionCompute, locations, count, &collisionMs);
                     RunIntegration(programs.integrateCompute, locations, count, false, timeStep,
                                    &integrationMs);
@@ -2119,262 +2247,101 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                     timing.collision += collisionMs;
                     timing.integration += integrationMs;
                     timing.grid += gridMs;
+                    timingSamples.bounds.push_back(boundsMs);
+                    timingSamples.construction.push_back(constructionMs);
+                    timingSamples.aggregation.push_back(aggregationMs);
+                    timingSamples.direct.push_back(directMs);
+                    timingSamples.collision.push_back(collisionMs);
+                    timingSamples.integration.push_back(integrationMs);
+                    timingSamples.grid.push_back(gridMs);
 
                     for (std::size_t thetaIndex = 0; thetaIndex < thetaValues.size(); ++thetaIndex)
                     {
                         float barnesHutMs = 0.0f;
-                        const auto barnesHutCpuStart = std::chrono::steady_clock::now();
                         RunBarnesHutCompute(programs.barnesHutCompute, locations, count, epsilon,
                                              thetaValues[thetaIndex], &barnesHutMs);
-                        barnesHutCpuSamples[thetaIndex].push_back(
-                            std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - barnesHutCpuStart)
-                                .count());
                         validateOctreeStatus();
                         barnesHutTimings[thetaIndex] += barnesHutMs;
-                        barnesHutGpuSamples[thetaIndex].push_back(
-                            boundsMs + constructionMs + aggregationMs + barnesHutMs +
-                            collisionMs);
-                        barnesHutAccelerations[thetaIndex].assign(accelerations,
-                                                                  accelerations + count);
-                        errors[thetaIndex] = calculateErrors(
-                            directAcceleration, barnesHutAccelerations[thetaIndex], count);
-                        for (double error : errors[thetaIndex])
+                        barnesHutTimingSamples[thetaIndex].push_back(barnesHutMs);
+                        errors[thetaIndex] =
+                            calculateErrors(directAcceleration, count);
+                        forceErrors[thetaIndex] =
+                            calculateForceErrors(directAcceleration, count);
+                        const error_utils::MetricResult *metrics[] = {
+                            &errors[thetaIndex].vectorRmse,
+                            &errors[thetaIndex].magnitudeMetrics.mape,
+                            &errors[thetaIndex].maxVectorError,
+                            &errors[thetaIndex].magnitudeMetrics.relativeError,
+                            &forceErrors[thetaIndex].vectorRmse,
+                            &forceErrors[thetaIndex].magnitudeMetrics.mape,
+                            &forceErrors[thetaIndex].maxVectorError,
+                            &forceErrors[thetaIndex].magnitudeMetrics.relativeError};
+                        for (const error_utils::MetricResult *metric : metrics)
                         {
-                            if (!std::isfinite(error))
+                            if (metric->available && !std::isfinite(metric->value))
                             {
                                 throw std::runtime_error(
                                     "Benchmark found a non-finite Barnes-Hut force error");
                             }
                         }
-                    }
-                }
-
-                std::cout << "Phase 8 same-snapshot comparison: distribution=" << distribution
-                          << ", objects=" << count << '\n';
-                std::set<std::uint32_t> objectIds;
-                for (std::size_t index = 0; index < count; ++index)
-                {
-                    if (snapshot.controls[index].id == kInvalidObjectId ||
-                        !objectIds.insert(snapshot.controls[index].id).second)
-                    {
-                        throw std::runtime_error(
-                            "Benchmark input contains a missing or duplicate object ID");
-                    }
-                    const float mass = snapshot.physical[index].massDensity.x;
-                    if (!std::isfinite(mass) || mass <= 0.0f ||
-                        !std::isfinite(snapshot.states[index].position.x) ||
-                        !std::isfinite(snapshot.states[index].position.y) ||
-                        !std::isfinite(snapshot.states[index].position.z) ||
-                        !std::isfinite(snapshot.states[index].velocity.x) ||
-                        !std::isfinite(snapshot.states[index].velocity.y) ||
-                        !std::isfinite(snapshot.states[index].velocity.z))
-                    {
-                        throw std::runtime_error(
-                            "Benchmark input contains invalid mass or state data");
-                    }
-                    const glm::vec3 directValue = directAcceleration[index].acceleration;
-                    const glm::vec3 barnesHutValue =
-                        barnesHutAccelerations[0][index].acceleration;
-                    writeResultRow(directResults, distribution, count,
-                                   snapshot.controls[index].id, 0, 0.0, NAN, mass,
-                                   snapshot.states[index], directValue, "same_snapshot_force");
-                }
-                const double repeatCount = static_cast<double>(timingRepeats);
-                const double commonMs = (timing.integration + timing.grid) / repeatCount;
-                const double collisionMs = timing.collision / repeatCount;
-                const double directTotalMs = timing.direct / repeatCount + commonMs;
-                const auto directCpuStats = timingStatistics(directCpuSamples);
-                const auto directGpuStats = timingStatistics(directGpuSamples);
-                directPerformance << distribution << ',' << count << ',' << timingRepeats << ','
-                                  << directCpuStats[0] << ',' << directCpuStats[1] << ','
-                                  << directCpuStats[2] << ',' << directGpuStats[0] << ','
-                                  << directGpuStats[1] << ',' << directGpuStats[2] << ','
-                                  << directTotalMs << ",,,\n";
-                for (std::size_t thetaIndex = 0; thetaIndex < thetaValues.size(); ++thetaIndex)
-                {
-                    const double barnesHutForceMs =
-                        barnesHutTimings[thetaIndex] / repeatCount;
-                    const double barnesHutPassMs =
-                        (timing.bounds + timing.construction + timing.aggregation) / repeatCount;
-                    const double barnesHutTotalMs =
-                        barnesHutPassMs + barnesHutForceMs + collisionMs + commonMs;
-                    const auto barnesHutCpuStats =
-                        timingStatistics(barnesHutCpuSamples[thetaIndex]);
-                    const auto barnesHutGpuStats =
-                        timingStatistics(barnesHutGpuSamples[thetaIndex]);
-                    const std::vector<GpuObjectAcceleration> &bhValues =
-                        barnesHutAccelerations[thetaIndex];
-                    std::vector<numerical::VectorPair> thetaAccelerationSamples;
-                    std::vector<numerical::VectorPair> thetaForceSamples;
-                    thetaAccelerationSamples.reserve(count);
-                    thetaForceSamples.reserve(count);
-                    for (std::size_t index = 0; index < count; ++index)
-                    {
-                        const glm::vec3 directValue = directAcceleration[index].acceleration;
-                        const glm::vec3 barnesHutValue = bhValues[index].acceleration;
-                        const float mass = snapshot.physical[index].massDensity.x;
-                        const numerical::Vector3 directForce = {
-                            static_cast<double>(directValue.x) * mass,
-                            static_cast<double>(directValue.y) * mass,
-                            static_cast<double>(directValue.z) * mass};
-                        const numerical::Vector3 barnesHutForce = {
-                            static_cast<double>(barnesHutValue.x) * mass,
-                            static_cast<double>(barnesHutValue.y) * mass,
-                            static_cast<double>(barnesHutValue.z) * mass};
-                        const double accelerationError =
-                            glm::length(barnesHutValue - directValue);
-                        const double forceDx = barnesHutForce.x - directForce.x;
-                        const double forceDy = barnesHutForce.y - directForce.y;
-                        const double forceDz = barnesHutForce.z - directForce.z;
-                        const double forceError =
-                            std::sqrt(forceDx * forceDx + forceDy * forceDy + forceDz * forceDz);
-                        const double directForceMagnitude =
-                            std::sqrt(directForce.x * directForce.x +
-                                      directForce.y * directForce.y +
-                                      directForce.z * directForce.z);
-                        const double accelerationRelativeError =
-                            accelerationError /
-                            std::max(static_cast<double>(glm::length(directValue)), 1.0e-12);
-                        const double forceRelativeError =
-                            forceError / std::max(directForceMagnitude, 1.0e-12);
-                        if (!std::isfinite(accelerationError) ||
-                            !std::isfinite(accelerationRelativeError) ||
-                            !std::isfinite(forceError) || !std::isfinite(forceRelativeError))
+                        for (std::size_t objectIndex = 0; objectIndex < count; ++objectIndex)
                         {
-                            throw std::runtime_error(
-                                "Benchmark produced a non-finite per-object comparison");
+                            const glm::vec3 expected =
+                                directAcceleration[objectIndex].acceleration;
+                            const glm::vec3 actual = accelerations[objectIndex].acceleration;
+                            const double referenceMagnitude = glm::length(expected);
+                            const double accelerationError = glm::length(actual - expected);
+                            const double mass = physical[objectIndex].massDensity.x;
+                            perObjectErrors << distribution << ',' << snapshotSeed << ',' << count
+                                            << ',' << thetaValues[thetaIndex] << ',' << repeat
+                                            << ',' << controls[objectIndex].id << ','
+                                            << accelerationError << ',';
+                            if (referenceMagnitude > 1.0e-12)
+                            {
+                                const double relativeError =
+                                    accelerationError / referenceMagnitude;
+                                perObjectErrors << relativeError << ','
+                                                << accelerationError * mass << ','
+                                                << relativeError;
+                            }
+                            else
+                            {
+                                perObjectErrors << "N/A," << accelerationError * mass << ",N/A";
+                            }
+                            perObjectErrors << '\n';
                         }
-                        thetaAccelerationSamples.push_back(
-                            {{directValue.x, directValue.y, directValue.z},
-                             {barnesHutValue.x, barnesHutValue.y, barnesHutValue.z}});
-                        thetaForceSamples.push_back(
-                            {directForce, barnesHutForce});
-                        writeResultRow(barnesHutResults, distribution, count,
-                                       snapshot.controls[index].id, 0, 0.0,
-                                       thetaValues[thetaIndex], mass, snapshot.states[index],
-                                       barnesHutValue, "same_snapshot_force");
-                        perObjectErrors << "same_snapshot_force," << distribution << ',' << count
-                                        << ',' << thetaValues[thetaIndex] << ",0,"
-                                        << snapshot.controls[index].id << ',' << accelerationError
-                                        << ',' << accelerationRelativeError << ',' << forceError
-                                        << ',' << forceRelativeError << ",0,0\n";
-                        std::cout << "  theta=" << thetaValues[thetaIndex]
-                                  << " object_id=" << snapshot.controls[index].id
-                                  << " acceleration_error=" << accelerationError
-                                  << " acceleration_relative_error="
-                                  << accelerationRelativeError << " force_error=" << forceError
-                                  << " force_relative_error=" << forceRelativeError << '\n';
                     }
-                    const numerical::VectorErrorMetrics thetaAccelerationMetrics =
-                        numerical::CalculateVectorMetrics(thetaAccelerationSamples, 1.0e-12);
-                    const numerical::VectorErrorMetrics thetaForceMetrics =
-                        numerical::CalculateVectorMetrics(thetaForceSamples, 1.0e-12);
-                    accelerationSummaryMetrics[thetaIndex] = thetaAccelerationMetrics;
-                    forceSummaryMetrics[thetaIndex] = thetaForceMetrics;
-                    std::cout << "Summary theta=" << thetaValues[thetaIndex]
-                              << ", acceleration RMSE="
-                              << thetaAccelerationMetrics.positionRmse
-                              << ", acceleration MAPE="
-                              << thetaAccelerationMetrics.componentMetrics.mape << "%"
-                              << ", acceleration max absolute error="
-                              << thetaAccelerationMetrics.maxPositionError
-                              << ", acceleration relative error="
-                              << thetaAccelerationMetrics.componentMetrics.relativeError
-                              << ", force RMSE=" << thetaForceMetrics.positionRmse
-                              << ", force MAPE=" << thetaForceMetrics.componentMetrics.mape
-                              << "%, force max absolute error="
-                              << thetaForceMetrics.maxPositionError
-                              << ", force relative error="
-                              << thetaForceMetrics.componentMetrics.relativeError
-                              << ", Direct GPU compute total=" << directTotalMs
-                              << " ms, Barnes-Hut GPU compute total=" << barnesHutTotalMs
-                              << " ms\n";
-                    barnesHutPerformance << distribution << ',' << count << ','
-                                         << thetaValues[thetaIndex] << ',' << timingRepeats << ','
-                                         << barnesHutCpuStats[0] << ',' << barnesHutCpuStats[1]
-                                         << ',' << barnesHutCpuStats[2] << ','
-                                         << barnesHutGpuStats[0] << ',' << barnesHutGpuStats[1]
-                                         << ',' << barnesHutGpuStats[2] << ','
-                                         << barnesHutTotalMs << ",,,\n";
                 }
 
-                bool trajectoryForCase = false;
                 if (!trajectoryWritten && count >= std::min<std::size_t>(32, objectCount) &&
                     distribution == "clustered")
                 {
                     const std::size_t trajectoryCount = std::min<std::size_t>(32, count);
                     const BenchmarkSnapshot trajectorySnapshot =
                         makeSnapshot(trajectoryCount, distribution, 918273u);
-                    struct TrajectoryFrame
-                    {
-                        std::vector<GpuObjectState> states;
-                        std::vector<GpuObjectAcceleration> accelerations;
-                    };
-                    const auto captureFrame = [&]
-                    {
-                        gpuMemoryManager.WaitForGpuCompletion();
-                        const auto *state = gpuMemoryManager.Get(BufferRole::CurrentState)
-                                                .MappedPtr<GpuObjectState>();
-                        const auto *acceleration =
-                            gpuMemoryManager.Get(BufferRole::ObjectAcceleration)
-                                .MappedPtr<GpuObjectAcceleration>();
-                        if (state == nullptr || acceleration == nullptr)
-                        {
-                            throw std::runtime_error(
-                                "GPU state mapping is unavailable for trajectory capture");
-                        }
-                        return TrajectoryFrame{
-                            std::vector<GpuObjectState>(state, state + trajectoryCount),
-                            std::vector<GpuObjectAcceleration>(acceleration,
-                                                               acceleration + trajectoryCount)};
-                    };
-                    const auto writeTrajectoryFrame = [&](std::ofstream &stream,
-                                                          const TrajectoryFrame &frame,
-                                                          std::size_t step, double theta)
-                    {
-                        for (std::size_t index = 0; index < trajectoryCount; ++index)
-                        {
-                            writeResultRow(
-                                stream, distribution, trajectoryCount,
-                                trajectorySnapshot.controls[index].id, step, step * timeStep,
-                                theta, trajectorySnapshot.physical[index].massDensity.x,
-                                frame.states[index], frame.accelerations[index].acceleration,
-                                "trajectory");
-                        }
-                    };
-                    std::vector<TrajectoryFrame> directTrajectory;
-                    directTrajectory.reserve(trajectorySteps + 1);
                     uploadSnapshot(trajectorySnapshot);
-                    RunNBodyCompute(programs.nbodyCompute, locations, trajectoryCount, epsilon);
-                    directTrajectory.push_back(captureFrame());
-                    writeTrajectoryFrame(directResults, directTrajectory.back(), 0, NAN);
-                    for (std::size_t step = 1; step <= trajectorySteps; ++step)
+                    std::vector<std::vector<GpuObjectState>> directTrajectory;
+                    directTrajectory.reserve(trajectorySteps + 1);
+                    directTrajectory.push_back(trajectorySnapshot.states);
+                    for (std::size_t step = 0; step < trajectorySteps; ++step)
                     {
                         RunGpuStateTransition(programs.nbodyCompute, programs.integrateCompute,
                                               locations, trajectoryCount, epsilon, false, timeStep);
-                        directTrajectory.push_back(captureFrame());
-                        writeTrajectoryFrame(directResults, directTrajectory.back(), step, NAN);
+                        gpuMemoryManager.WaitForGpuCompletion();
+                        const auto *directStep =
+                            gpuMemoryManager.Get(BufferRole::CurrentState)
+                                .MappedPtr<GpuObjectState>();
+                        directTrajectory.emplace_back(directStep, directStep + trajectoryCount);
                     }
 
                     for (std::size_t thetaIndex = 0; thetaIndex < thetaValues.size(); ++thetaIndex)
                     {
-                        std::vector<TrajectoryFrame> barnesHutTrajectory;
-                        barnesHutTrajectory.reserve(trajectorySteps + 1);
                         uploadSnapshot(trajectorySnapshot);
-                        RunOctreeConstruction(programs.boundingBoxCompute,
-                                              programs.octreeBuildCompute, locations,
-                                              trajectoryCount);
-                        validateOctreeStatus();
-                        RunMassAggregation(programs.massAggregationCompute, trajectoryCount);
-                        validateOctreeStatus();
-                        RunBarnesHutCompute(programs.barnesHutCompute, locations,
-                                            trajectoryCount, epsilon, thetaValues[thetaIndex]);
-                        validateOctreeStatus();
-                        barnesHutTrajectory.push_back(captureFrame());
-                        writeTrajectoryFrame(barnesHutResults, barnesHutTrajectory.back(), 0,
-                                             thetaValues[thetaIndex]);
-                        for (std::size_t step = 1; step <= trajectorySteps; ++step)
+                        double squaredPositionError = 0.0;
+                        double maximumPositionError = 0.0;
+                        double squaredVelocityError = 0.0;
+                        double maximumVelocityError = 0.0;
+                        for (std::size_t step = 0; step < trajectorySteps; ++step)
                         {
                             RunOctreeConstruction(programs.boundingBoxCompute,
                                                   programs.octreeBuildCompute, locations,
@@ -2387,111 +2354,155 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                                 programs.integrateCompute, locations, trajectoryCount, epsilon,
                                 thetaValues[thetaIndex], false, timeStep);
                             validateOctreeStatus();
-                            barnesHutTrajectory.push_back(captureFrame());
-                            writeTrajectoryFrame(barnesHutResults, barnesHutTrajectory.back(),
-                                                 step, thetaValues[thetaIndex]);
-                        }
-                        for (std::size_t step = 0; step <= trajectorySteps; ++step)
-                        {
-                            std::vector<numerical::VectorPair> positionsAtStep;
-                            std::vector<numerical::VectorPair> velocitiesAtStep;
-                            positionsAtStep.reserve(trajectoryCount);
-                            velocitiesAtStep.reserve(trajectoryCount);
+                            gpuMemoryManager.WaitForGpuCompletion();
+                            const auto *barnesHutStep =
+                                gpuMemoryManager.Get(BufferRole::CurrentState)
+                                    .MappedPtr<GpuObjectState>();
+                            double stepSquaredPositionError = 0.0;
+                            double stepMaximumPositionError = 0.0;
+                            double stepSquaredVelocityError = 0.0;
+                            double stepMaximumVelocityError = 0.0;
                             for (std::size_t index = 0; index < trajectoryCount; ++index)
                             {
-                                const std::uint32_t objectId =
-                                    trajectorySnapshot.controls[index].id;
-                                const glm::vec3 directPosition =
-                                    directTrajectory[step].states[index].position;
-                                const glm::vec3 bhPosition =
-                                    barnesHutTrajectory[step].states[index].position;
-                                const glm::vec3 directVelocity =
-                                    directTrajectory[step].states[index].velocity;
-                                const glm::vec3 bhVelocity =
-                                    barnesHutTrajectory[step].states[index].velocity;
-                                positionsAtStep.push_back(
-                                    {{directPosition.x, directPosition.y, directPosition.z},
-                                     {bhPosition.x, bhPosition.y, bhPosition.z}});
-                                velocitiesAtStep.push_back(
-                                    {{directVelocity.x, directVelocity.y, directVelocity.z},
-                                     {bhVelocity.x, bhVelocity.y, bhVelocity.z}});
-                                const double positionError = glm::length(bhPosition - directPosition);
-                                const double velocityError = glm::length(bhVelocity - directVelocity);
-                                perObjectErrors << "trajectory," << distribution << ','
-                                                << trajectoryCount << ','
-                                                << thetaValues[thetaIndex] << ',' << step << ','
-                                                << objectId << ",,,,," << positionError << ','
-                                                << velocityError << '\n';
+                                const GpuObjectState &directState =
+                                    directTrajectory[step + 1][index];
+                                const GpuObjectState &barnesHutState = barnesHutStep[index];
+                                const double positionError =
+                                    glm::length(glm::dvec3(barnesHutState.position) -
+                                                glm::dvec3(directState.position));
+                                const double velocityError =
+                                    glm::length(glm::dvec3(barnesHutState.velocity) -
+                                                glm::dvec3(directState.velocity));
+                                squaredPositionError += positionError * positionError;
+                                maximumPositionError =
+                                    std::max(maximumPositionError, positionError);
+                                squaredVelocityError += velocityError * velocityError;
+                                maximumVelocityError =
+                                    std::max(maximumVelocityError, velocityError);
+                                stepSquaredPositionError += positionError * positionError;
+                                stepMaximumPositionError =
+                                    std::max(stepMaximumPositionError, positionError);
+                                stepSquaredVelocityError += velocityError * velocityError;
+                                stepMaximumVelocityError =
+                                    std::max(stepMaximumVelocityError, velocityError);
+                                trajectoryErrors
+                                    << distribution << ',' << trajectoryCount << ','
+                                    << thetaValues[thetaIndex] << ',' << step + 1 << ','
+                                    << (step + 1) * timeStep << ','
+                                    << trajectorySnapshot.controls[index].id << ','
+                                    << positionError << ',' << velocityError << '\n';
                             }
-                            const numerical::VectorErrorMetrics positionMetrics =
-                                numerical::CalculateVectorMetrics(positionsAtStep, 1.0e-12);
-                            const numerical::VectorErrorMetrics velocityMetrics =
-                                numerical::CalculateVectorMetrics(velocitiesAtStep, 1.0e-12);
-                            perStepErrors << "trajectory," << distribution << ','
-                                          << trajectoryCount << ',' << thetaValues[thetaIndex]
-                                          << ',' << step << ',' << step * timeStep << ','
-                                          << positionMetrics.positionRmse << ','
-                                          << positionMetrics.maxPositionError << ','
-                                          << velocityMetrics.positionRmse << ','
-                                          << velocityMetrics.maxPositionError << '\n';
-                            std::cout << "Trajectory step " << step
-                                      << ", theta=" << thetaValues[thetaIndex]
-                                      << ", position RMSE="
-                                      << positionMetrics.positionRmse
-                                      << ", max position error="
-                                      << positionMetrics.maxPositionError
-                                      << ", velocity RMSE=" << velocityMetrics.positionRmse
-                                      << ", max velocity error="
-                                      << velocityMetrics.maxPositionError << '\n';
-                            if (step == trajectorySteps)
-                            {
-                                trajectoryRmsPositionErrors[thetaIndex] =
-                                    positionMetrics.positionRmse;
-                                trajectoryMaximumPositionErrors[thetaIndex] =
-                                    positionMetrics.maxPositionError;
-                            }
+                            const double sampleCount = static_cast<double>(trajectoryCount);
+                            perStepErrors << distribution << ',' << trajectoryCount << ','
+                                          << thetaValues[thetaIndex] << ',' << step + 1 << ','
+                                          << (step + 1) * timeStep << ','
+                                          << std::sqrt(stepSquaredPositionError / sampleCount)
+                                          << ',' << stepMaximumPositionError << ','
+                                          << std::sqrt(stepSquaredVelocityError / sampleCount)
+                                          << ',' << stepMaximumVelocityError << '\n';
                         }
+                        const double trajectorySampleCount =
+                            static_cast<double>(trajectoryCount * trajectorySteps);
+                        trajectoryRmsPositionErrors[thetaIndex] =
+                            std::sqrt(squaredPositionError / trajectorySampleCount);
+                        trajectoryMaximumPositionErrors[thetaIndex] = maximumPositionError;
+                        trajectoryRmsVelocityErrors[thetaIndex] =
+                            std::sqrt(squaredVelocityError / trajectorySampleCount);
+                        trajectoryMaximumVelocityErrors[thetaIndex] = maximumVelocityError;
                     }
                     trajectoryWritten = true;
-                    trajectoryForCase = true;
                 }
 
+                const double repeatCount = static_cast<double>(timingRepeats);
+                const double commonMs =
+                    (timing.integration + timing.grid) / repeatCount;
+                const double collisionMs = timing.collision / repeatCount;
+                const double directTotalMs = timing.direct / repeatCount + commonMs;
+                const double barnesHutPassMs =
+                    (timing.bounds + timing.construction + timing.aggregation) / repeatCount;
+                std::vector<double> directTotalSamples;
+                directTotalSamples.reserve(timingRepeats);
+                for (std::size_t repeat = 0; repeat < timingRepeats; ++repeat)
+                {
+                    directTotalSamples.push_back(timingSamples.direct[repeat] +
+                                                 timingSamples.integration[repeat] +
+                                                 timingSamples.grid[repeat]);
+                }
+                writePerformanceRow("direct", "nbody_with_collision", distribution, count, "",
+                                    timingSamples.direct);
+                writePerformanceRow("direct", "integration", distribution, count, "",
+                                    timingSamples.integration);
+                writePerformanceRow("direct", "grid", distribution, count, "", timingSamples.grid);
+                writePerformanceRow("direct", "total_compute", distribution, count, "",
+                                    directTotalSamples);
                 for (std::size_t thetaIndex = 0; thetaIndex < thetaValues.size(); ++thetaIndex)
                 {
                     const double barnesHutForceMs =
                         barnesHutTimings[thetaIndex] / repeatCount;
-                    const double barnesHutPassMs =
-                        (timing.bounds + timing.construction + timing.aggregation) / repeatCount;
+                    std::vector<double> barnesHutTotalSamples;
+                    barnesHutTotalSamples.reserve(timingRepeats);
+                    for (std::size_t repeat = 0; repeat < timingRepeats; ++repeat)
+                    {
+                        barnesHutTotalSamples.push_back(
+                            timingSamples.bounds[repeat] + timingSamples.construction[repeat] +
+                            timingSamples.aggregation[repeat] +
+                            barnesHutTimingSamples[thetaIndex][repeat] +
+                            timingSamples.collision[repeat] + timingSamples.integration[repeat] +
+                            timingSamples.grid[repeat]);
+                    }
                     const double barnesHutTotalMs =
                         barnesHutPassMs + barnesHutForceMs + collisionMs + commonMs;
-                    summary << distribution << ',' << count << ',' << thetaValues[thetaIndex]
-                            << ',' << accelerationSummaryMetrics[thetaIndex].positionRmse << ','
-                            << accelerationSummaryMetrics[thetaIndex].componentMetrics.mape << ','
-                            << accelerationSummaryMetrics[thetaIndex].maxPositionError << ','
-                            << accelerationSummaryMetrics[thetaIndex]
-                                   .componentMetrics.relativeError
-                            << ',' << forceSummaryMetrics[thetaIndex].positionRmse << ','
-                            << forceSummaryMetrics[thetaIndex].componentMetrics.mape << ','
-                            << forceSummaryMetrics[thetaIndex].maxPositionError << ','
-                            << forceSummaryMetrics[thetaIndex].componentMetrics.relativeError
-                            << ','
-                            << (trajectoryForCase
-                                    ? trajectoryRmsPositionErrors[thetaIndex]
-                                    : 0.0)
-                            << ','
-                            << (trajectoryForCase
-                                    ? trajectoryMaximumPositionErrors[thetaIndex]
-                                    : 0.0)
-                            << ',' << (trajectoryForCase ? trajectorySteps : 0) << ','
-                            << directTotalMs << ',' << barnesHutTotalMs << '\n';
+                    const std::string thetaName = std::to_string(thetaValues[thetaIndex]);
+                    writePerformanceRow("barnes_hut", "bounds", distribution, count,
+                                        thetaName.c_str(), timingSamples.bounds);
+                    writePerformanceRow("barnes_hut", "construction", distribution, count,
+                                        thetaName.c_str(), timingSamples.construction);
+                    writePerformanceRow("barnes_hut", "mass_aggregation", distribution, count,
+                                        thetaName.c_str(), timingSamples.aggregation);
+                    writePerformanceRow("barnes_hut", "force", distribution, count,
+                                        thetaName.c_str(),
+                                        barnesHutTimingSamples[thetaIndex]);
+                    writePerformanceRow("barnes_hut", "collision", distribution, count,
+                                        thetaName.c_str(), timingSamples.collision);
+                    writePerformanceRow("barnes_hut", "integration", distribution, count,
+                                        thetaName.c_str(), timingSamples.integration);
+                    writePerformanceRow("barnes_hut", "grid", distribution, count,
+                                        thetaName.c_str(), timingSamples.grid);
+                    writePerformanceRow("barnes_hut", "total_compute", distribution, count,
+                                        thetaName.c_str(), barnesHutTotalSamples);
                     const bool hasTrajectory =
                         trajectoryWritten && count == std::min<std::size_t>(32, objectCount) &&
                         distribution == "clustered";
+                    const error_utils::VectorErrorMetrics &error = errors[thetaIndex];
                     report << '"' << renderer << "\",\"" << version << "\","
-                           << distribution << ',' << count << ',' << thetaValues[thetaIndex] << ','
-                           << timingRepeats << ',' << errors[thetaIndex][0] << ','
-                           << errors[thetaIndex][1] << ',' << errors[thetaIndex][2] << ','
-                           << errors[thetaIndex][3] << ','
+                           << distribution << ',' << snapshotSeed << ',' << count << ','
+                           << thetaValues[thetaIndex] << ',' << timingRepeats << ','
+                           << error.vectorRmse.value << ',';
+                    if (error.magnitudeMetrics.mape.available)
+                    {
+                        report << error.magnitudeMetrics.mape.value;
+                    }
+                    report << ',' << error.maxVectorError.value << ',';
+                    if (error.magnitudeMetrics.relativeError.available)
+                    {
+                        report << error.magnitudeMetrics.relativeError.value;
+                    }
+                    report << ',' << error.magnitudeMetrics.relativeError.skippedReferenceCount
+                           << ',' << forceErrors[thetaIndex].vectorRmse.value << ',';
+                    if (forceErrors[thetaIndex].magnitudeMetrics.mape.available)
+                    {
+                        report << forceErrors[thetaIndex].magnitudeMetrics.mape.value;
+                    }
+                    report << ',' << forceErrors[thetaIndex].maxVectorError.value << ',';
+                    if (forceErrors[thetaIndex].magnitudeMetrics.relativeError.available)
+                    {
+                        report << forceErrors[thetaIndex]
+                                      .magnitudeMetrics.relativeError.value;
+                    }
+                    report << ','
+                           << forceErrors[thetaIndex]
+                                  .magnitudeMetrics.relativeError.skippedReferenceCount
+                           << ','
                            << timing.bounds / repeatCount << ','
                            << timing.construction / repeatCount << ','
                            << timing.aggregation / repeatCount << ','
@@ -2500,29 +2511,35 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
                            << timing.collision / repeatCount << ','
                            << timing.integration / repeatCount << ',' << timing.grid / repeatCount
                            << ',' << directTotalMs << ',' << barnesHutTotalMs << ','
-                           << (hasTrajectory ? trajectorySteps : 0) << ','
-                           << (hasTrajectory ? trajectorySeconds : 0.0) << ','
-                           << (hasTrajectory ? trajectoryRmsPositionErrors[thetaIndex] : 0.0)
-                           << ','
-                           << (hasTrajectory
-                                   ? trajectoryMaximumPositionErrors[thetaIndex]
-                                   : 0.0)
-                           << '\n';
+                           << (hasTrajectory ? trajectorySteps : 0) << ',';
+                    if (hasTrajectory)
+                    {
+                        report << trajectorySeconds << ','
+                               << trajectoryRmsPositionErrors[thetaIndex] << ','
+                               << trajectoryMaximumPositionErrors[thetaIndex] << ','
+                               << trajectoryRmsVelocityErrors[thetaIndex] << ','
+                               << trajectoryMaximumVelocityErrors[thetaIndex];
+                    }
+                    else
+                    {
+                        report << "N/A,N/A,N/A,N/A,N/A";
+                    }
+                    report << '\n';
                 }
             }
         }
         report.flush();
-        for (std::ofstream *stream : {&report, &directResults, &directPerformance,
-                                      &barnesHutResults, &barnesHutPerformance,
-                                      &perObjectErrors, &perStepErrors, &summary, &metadata})
-        {
-            stream->flush();
-            if (!stream->good())
-            {
-                throw std::runtime_error("Failed while writing a Phase 8 benchmark result file");
-            }
-        }
-        if (!report.good())
+        perObjectErrors.flush();
+        trajectoryErrors.flush();
+        perStepErrors.flush();
+        performance.flush();
+        nodeValidation.flush();
+        massSummary.flush();
+        metadata.flush();
+        if (!report.good() || !perObjectErrors.good() || !trajectoryErrors.good() ||
+            !perStepErrors.good() || !performance.good() || !nodeValidation.good() ||
+            !massSummary.good() ||
+            !metadata.good())
         {
             throw std::runtime_error("Failed while writing Barnes-Hut benchmark report");
         }
@@ -2533,10 +2550,8 @@ void RunBarnesHutValidationSuite(const ShaderPrograms &programs,
         throw;
     }
     restoreOriginalData();
-    std::cout << "Phase 8 summary: "
-              << std::filesystem::absolute(runDirectory).string() << '\n'
-              << "Wrote benchmark matrix to numerical_error/barnes_hut_benchmark.csv"
-              << std::endl;
+    std::cout << "Wrote same-snapshot Barnes-Hut validation and GPU timings to "
+              << (runDirectory / "comparison" / "summary.csv").string() << std::endl;
 }
 
 void Cleanup(const ShaderPrograms &shaderPrograms)
@@ -2969,28 +2984,3 @@ std::vector<Object> CreateObjects(const std::string &objectFilePath, int randomO
     defaultObjects.insert(defaultObjects.end(), randomBodies.begin(), randomBodies.end());
     return defaultObjects;
 }
-
-// GLuint CreateObjectCellID(const std::vector<Object> &objects, GLuint &cellIDBuffer)
-// {
-//     std::vector<GLuint> cellIDs(objects.size());
-//     for (size_t i = 0; i < objects.size(); ++i)
-//     {
-//         const Object &obj = objects[i];
-//         glm::ivec3 cellIndex = glm::ivec3(
-//             static_cast<int>((obj.position.x + gridSize / 2.0f) / (gridSize / gridDivisions)),
-//             static_cast<int>((obj.position.y + gridSize / 2.0f) / (gridSize / gridDivisions)),
-//             static_cast<int>((obj.position.z + gridSize / 2.0f) / (gridSize / gridDivisions)));
-//         cellIDs[i] = static_cast<GLuint>(cellIndex.x + cellIndex.y * (gridDivisions + 1) +
-//                                           cellIndex.z * (gridDivisions + 1) * (gridDivisions +
-//                                           1));
-//     }
-
-//     glGenBuffers(1, &cellIDBuffer);
-//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, cellIDBuffer);
-//     glBufferData(GL_SHADER_STORAGE_BUFFER, cellIDs.size() * sizeof(GLuint), cellIDs.data(),
-//                  GL_STATIC_DRAW);
-//     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-//     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, cellIDBuffer);
-
-//     return cellIDBuffer;
-// }
