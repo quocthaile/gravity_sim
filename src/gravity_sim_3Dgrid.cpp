@@ -1,6 +1,5 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 #include <chrono>
-#include <string_view>
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
@@ -46,15 +45,8 @@ GLuint objectCellID = 0;
 // numerical error
 double dt = 1.0 / 96.0;
 
-int main(int argc, char **argv)
+int main()
 {
-    const bool runBenchmark = argc > 1 && std::string_view(argv[1]) == "--benchmark";
-    if (argc > 2 || (argc == 2 && !runBenchmark))
-    {
-        std::cerr << "Usage: gravity_sim_3Dgrid.exe [--benchmark]" << std::endl;
-        return 2;
-    }
-
     float epsilon = 10.0f;
 
     // Initialize OpenGL resources.
@@ -117,14 +109,6 @@ int main(int argc, char **argv)
                      .count()
               << " ms" << std::endl;
 
-    if (runBenchmark)
-    {
-        RunBarnesHutValidationSuite(shaderPrograms, computeUniformLocations, objectCount, epsilon,
-                                    dt);
-        Cleanup(shaderPrograms);
-        return 0;
-    }
-
     // mass aggregation
     std::cout << "Cell size: " << CEll_SIZE << std::endl;
     // CreateObjectCellID(objs, objectCellID);
@@ -149,7 +133,7 @@ int main(int argc, char **argv)
 
     // Main loop: runs until the window is closed or the simulation is stopped.
     int numofFrames = 0;
-    constexpr float barnesHutTheta = 0.3f;
+    constexpr float barnesHutTheta = 0.5f;
     while (!glfwWindowShouldClose(window) && running == true)
     {
         std::cout << "Frame: " << numofFrames << ", Delta Time: " << deltaTime << " s" << std::endl;

@@ -60,7 +60,13 @@ positions are not a reproducible baseline input.
   solver so both consume the same `CurrentState` snapshot.
 - Keep collision results valid if the direct force loop is replaced or split.
 - Keep `integrate.comp`, `SwapCurrentNext()`, and the existing Schwarzschild grid
-  path unchanged.
+  path unchanged in the initial integration.
+
+An existing untracked `PLAN_MASS_AGGREGATION.md` describes an earlier, incompatible
+scope in which aggregates drive grid deformation and force remains direct. This
+Barnes-Hut plan instead requires Barnes-Hut force and preserves the current
+per-object Schwarzschild grid. The older plan was left untouched; resolve that
+document conflict before using it as implementation guidance.
 
 ## Stage 1: Octree data contract
 
@@ -179,10 +185,10 @@ Schwarzschild grid deformation are preserved.
 
 The Debug application ran in an isolated working directory with the default
 202-object scene. The debug Octree validator completed successfully while the
-application continued through mass aggregation, Barnes-Hut, collision,
-integration, and grid deformation for more than 240 frames and wrote its
-position capture. The default-scene run does not independently exercise an
-all-initializing scene or coincident-object input.
+application continued through Direct N-body, integration, and grid deformation
+for more than 240 frames and wrote its position capture. The default-scene run
+does not independently exercise an all-initializing scene or coincident-object
+input.
 
 ## Stage 4: Mass aggregation
 
@@ -220,129 +226,34 @@ Debug validation checks finite accelerations and zero acceleration for
 initializing objects; it also compares collision counts against a CPU reference.
 The default 202-object scene ran through the construction, aggregation,
 Barnes-Hut, collision, integration, and grid passes without validation errors.
+This is a correctness smoke test, not a Barnes-Hut-vs-direct accuracy or
+performance benchmark; those measurements remain for Stage 8.
 
-## Stages 6-8: Integration, grid preservation, and measured validation
+## Stage 6: Frame-pipeline integration
 
-The production frame order is:
+The main loop runs state synchronization, bounding-box calculation, Octree
+construction, mass aggregation, Barnes-Hut, direct collision detection,
+integration, and `SwapCurrentNext()` in that order. Grid computation then runs
+against the newly bound `CurrentState`. The first rendered/simulated frame goes
+through this same sequence, so Barnes-Hut never reads an unbuilt tree. `integrate.comp`
+is unchanged, and the collision pass writes every object's overlap count before
+integration reads it.
 
-```text
-RunObjectStateSync
-  -> bounding_box.comp
-  -> build_octree.comp
-  -> mass_aggregation.comp
-  -> barnes_hut.comp (theta = 0.3)
-  -> collision.comp
-  -> integrate.comp
-  -> SwapCurrentNext
-  -> grid.comp
-  -> draw
-```
+The Debug application ran this complete first-frame sequence and continued for
+hundreds of frames with metadata, aggregation, acceleration, and collision
+validation enabled.
 
-Bounding, construction, aggregation, and force evaluation all consume the same
-pre-integration `CurrentState`; SSBO barriers separate every producer and
-consumer. Collision output is written before the unchanged integration shader.
-The grid shader remains byte-for-byte unchanged from the Direct N-body baseline,
-uses only bindings 0, 4, 5, and 12, and still executes after the state swap.
+## Stage 7: Schwarzschild grid preservation
 
-Run the Release validation sweep from an isolated working directory with:
+`grid.comp` remains unchanged from the Direct N-body baseline. Its SSBO
+dependencies remain `CurrentState` (0), `BaseGrid` (4), `DeformedGrid` (5), and
+`ObjectDerived` (12); it does not read `MassField`, `OctreeNodes`, or
+`ObjectIndexList`. The same distance conversion, `r_s * 1.0001` clamp, and
+per-object displacement sum are retained. The frame loop dispatches it after
+the current/next swap.
 
-```text
-gravity_sim_3Dgrid.exe --benchmark
-```
-
-It generates `numerical_error/barnes_hut_benchmark.csv` and exits without
-starting the interactive simulation. The deterministic sweep covers 32, 128,
-and 202 objects, uniform/clustered/disk distributions, and theta values 0.3,
-0.5, and 0.8. Each force comparison runs Direct N-body and Barnes-Hut on the
-same frozen positions and masses. It records RMS/max absolute and relative
-acceleration error. The clustered 32-object case also compares the final
-positions after 24 fixed steps (`dt = 1/96 s`) for each theta against a Direct
-N-body trajectory.
-
-GPU timings use OpenGL `GL_TIME_ELAPSED` around each dispatch and its required
-barrier, averaged over three repetitions after a warm-up. The direct total is
-Direct N-body (which also writes collision counts) + integration + grid. The
-Barnes-Hut total is bounds + construction + mass aggregation + Barnes-Hut +
-separate collision + integration + grid. These are GPU compute totals, not full
-rendered-frame times; they exclude CPU work, draw calls, and presentation.
-
-### Previous validation results (earlier metric definition)
-
-Environment: NVIDIA GeForce RTX 3050 Laptop GPU, OpenGL 4.4.0
-(`610.62` driver string), Release build, `G = 6.6743e-11`, `epsilon = 10`,
-`dt = 1/96 s`, three timed repeats per case. Acceleration relative error is
-RMS over objects, normalized by each Direct acceleration magnitude with a
-`1e-12` floor. Times are milliseconds.
-
-| Objects / distribution | RMS relative error (theta 0.3 / 0.5 / 0.8) | Direct total | Barnes-Hut total (theta 0.3 / 0.5 / 0.8) |
-| --- | ---: | ---: | ---: |
-| 32 / uniform | 0.002056 / 0.014000 / 0.039063 | 0.090 | 0.567 / 0.584 / 0.554 |
-| 32 / clustered | 0.000239 / 0.001453 / 0.007635 | 0.089 | 0.651 / 0.635 / 0.620 |
-| 32 / disk | 0.003126 / 0.008378 / 0.059375 | 0.099 | 0.621 / 0.618 / 0.593 |
-| 128 / uniform | 0.001487 / 0.009312 / 0.038051 | 0.495 | 2.494 / 2.300 / 2.123 |
-| 128 / clustered | 0.000497 / 0.004975 / 0.024193 | 0.454 | 2.578 / 2.557 / 2.495 |
-| 128 / disk | 0.003200 / 0.014692 / 0.049816 | 0.471 | 2.606 / 2.444 / 2.344 |
-| 202 / uniform | 0.001408 / 0.008112 / 0.031526 | 0.785 | 3.267 / 3.070 / 2.914 |
-| 202 / clustered | 0.001029 / 0.006604 / 0.033276 | 0.666 | 3.193 / 3.123 / 3.049 |
-| 202 / disk | 0.004476 / 0.013706 / 0.042400 | 0.689 | 3.572 / 3.279 / 3.102 |
-
-For the representative uniform, 202-object case at theta 0.3, the measured
-per-pass GPU times were: bounds 0.276 ms, construction 0.829 ms, aggregation
-1.010 ms, direct N-body 0.656 ms, Barnes-Hut force 0.665 ms, collision 0.357
-ms, integration 0.009 ms, and grid 0.120 ms. The direct total includes collision
-calculation within its N-body shader; the Barnes-Hut total includes the separate
-collision pass.
-
-For the clustered 32-object, 24-step trajectory, RMS/max position error was
-`0.000405 / 0.001007` at theta 0.3, `0.001003 / 0.002303` at theta 0.5, and
-`0.010958 / 0.038148` at theta 0.8 (simulation units). Theta 0.3 is the
-production default because it yielded the lowest sampled acceleration and
-trajectory errors; it was not selected for frame rate. The measured Barnes-Hut
-pipeline is slower than Direct N-body for every tested size and distribution
-and theta.
-With the current serial bounds/tree/aggregation passes and these small systems,
-the implementation is a correctness milestone, not a performance improvement.
-
-The sweep found no NaN/Inf, invalid-tree status, node-capacity overflow,
-traversal-stack overflow, or buffer-range failure. The matrix does not establish
-large-N behavior, an accuracy tolerance for all workloads, or the absence of
-rare failures beyond the tested snapshots. Its raw per-case data is stored in
-the generated CSV alongside per-pass timings and maximum acceleration errors.
-
-### Phase 8 rerun after plan and code edits (2026-11-15)
-
-The rerun uses the updated vector-error metrics, independent per-node mass/COM
-validation, per-step position and velocity comparisons, and timestamped output
-folders. The previous table is retained as historical data; its relative-error
-definition and CSV schema differ, so compare against the new run using the
-updated formulas documented in
-[the run guide](./HUONG_DAN_CHAY_TINH_SAI_SO_BARNES_HUT.md).
-
-Run: `numerical_error/run_20261115_113304_880/`, Release build, 202 initial
-objects, NVIDIA GeForce RTX 3050 Laptop GPU, OpenGL 4.4.0
-(`610.62` driver string), `G = 6.6743e-11`, `epsilon = 10`, and
-`dt = 1/96 s`.
-
-- The sweep produced 27 summary rows, 9 Mass Aggregation configurations,
-  252 performance rows, 9,774 per-object acceleration/force error rows, and
-  2,304 trajectory rows (32 objects × 24 steps × 3 theta values).
-- All 1,781 Octree nodes passed the direct mass/COM validation. Maximum relative
-  mass error was `8.43e-8`; maximum COM error was `5.89e-4` simulation units.
-- For 202 uniform objects at theta 0.3, acceleration vector RMSE was
-  `0.013442`, MAPE `0.117449%`, aggregate relative error `0.001013`, and max
-  vector error `0.031889`. Force vector RMSE was `2.482e21`.
-- In that same case, Direct total GPU compute was `0.8585 ms` (mean; median
-  `0.8970 ms`, standard deviation `0.1141 ms`). Barnes–Hut total was
-  `3.8960 ms` (mean; median `3.7775 ms`, standard deviation `0.7152 ms`).
-- For the clustered 32-object, 24-step trajectory, position RMS/max errors
-  were `0.000264 / 0.001007`, `0.000544 / 0.002303`, and
-  `0.005280 / 0.038148` for theta 0.3/0.5/0.8. Velocity RMS/max errors were
-  `0.001432 / 0.005423`, `0.004230 / 0.013562`, and
-  `0.050104 / 0.298261`.
-- No non-finite values or failed node validations were found in the generated
-  outputs. CPU submission time, transfer time, frame time, and FPS remain N/A;
-  this run measures GPU compute passes only.
-
-The old files in `numerical_error/` were not overwritten. The new benchmark
-creates a unique `run_*` folder and records metadata, per-object/per-step
-comparisons, node validation, and GPU timing statistics.
+On the first Debug frame, a CPU reference evaluates every grid vertex using
+the current post-swap positions and the same `ObjectDerived` snapshot, then
+compares all output coordinates with the GPU `DeformedGrid`. The check passed
+for the default scene, confirming the grid result for that snapshot while
+Barnes-Hut changes only the evolved object state.
