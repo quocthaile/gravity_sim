@@ -83,7 +83,7 @@ struct ComputeUniformLocations
     GLint gridHeight = -1;
 };
 
-GLFWwindow *StartGLU();
+GLFWwindow *StartGLU(bool hidden = false);
 std::string LoadShaderSource(const std::string &filePath);
 void CreateShaderProgram(ShaderPrograms &programs);
 void InitializeComputeUniformLocations(const ShaderPrograms &programs,
@@ -106,12 +106,22 @@ void InitializeGridRenderingResources(const std::vector<glm::vec4> &gridVertices
                                       const std::vector<unsigned int> &gridIndices);
 void ComputePipeline(const std::vector<glm::vec4> &basePositions);
 void RunOctreeConstruction(GLuint boundingBoxShaderProgram, GLuint octreeBuildShaderProgram,
-                           const ComputeUniformLocations &locations, size_t objectCount);
-void RunMassAggregation(GLuint computeShaderProgram, size_t objectCount);
+                           const ComputeUniformLocations &locations, size_t objectCount,
+                           bool validateDebug = true);
+void RunMassAggregation(GLuint computeShaderProgram, size_t objectCount,
+                        bool validateDebug = true);
+std::string RunMassAggregationBenchmark(GLuint boundingBoxShaderProgram,
+                                        GLuint octreeBuildShaderProgram,
+                                        GLuint massAggregationShaderProgram);
+std::string RunAccelerationBenchmark(const ShaderPrograms &shaderPrograms,
+                                     const ComputeUniformLocations &locations);
+std::string RunTrajectoryBenchmark(const ShaderPrograms &shaderPrograms,
+                                   const ComputeUniformLocations &locations);
 void RunBarnesHutCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                         size_t objectCount, float epsilon, float theta);
+                         size_t objectCount, float epsilon, float theta,
+                         bool validateDebug = true);
 void RunCollisionCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
-                         size_t objectCount);
+                         size_t objectCount, bool validateDebug = true);
 void RunNBodyCompute(GLuint computeShaderProgram, const ComputeUniformLocations &locations,
                      size_t objectCount, float epsilon);
 void RunIntegration(GLuint computeShaderProgram, const ComputeUniformLocations &locations,

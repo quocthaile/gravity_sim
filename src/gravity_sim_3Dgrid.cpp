@@ -1,5 +1,6 @@
 #include "gravity_sim_3Dgrid_function.hpp"
 #include <chrono>
+#include <cstring>
 
 // Simulation and compute configuration.
 const double kGravitationalConstant = 6.6743e-11;
@@ -45,41 +46,70 @@ GLuint objectCellID = 0;
 // numerical error
 double dt = 1.0 / 96.0;
 
-int main()
+int main(int argc, char **argv)
 {
+    const bool runMassAggregationBenchmark =
+        argc == 2 && std::strcmp(argv[1], "--mass-aggregation-benchmark") == 0;
+    const bool runAccelerationBenchmark =
+        argc == 2 && std::strcmp(argv[1], "--acceleration-benchmark") == 0;
+    const bool runTrajectoryBenchmark =
+        argc == 2 && std::strcmp(argv[1], "--trajectory-benchmark") == 0;
+    const bool runNumericalBenchmark =
+        runMassAggregationBenchmark || runAccelerationBenchmark || runTrajectoryBenchmark;
+    if (argc > 1 && !runNumericalBenchmark)
+    {
+        std::cerr << "Usage: gravity_sim_3Dgrid [--mass-aggregation-benchmark | "
+                     "--acceleration-benchmark | --trajectory-benchmark]"
+                  << std::endl;
+        return 2;
+    }
+
     float epsilon = 10.0f;
 
     // Initialize OpenGL resources.
     ShaderPrograms shaderPrograms;
     ShaderUniformLocations uniformLocations;
     ComputeUniformLocations computeUniformLocations;
-    GLFWwindow *window = StartGLU();
+    GLFWwindow *window = StartGLU(runNumericalBenchmark);
+    if (window == nullptr)
+    {
+        return 1;
+    }
 
     // Set up GLFW callbacks for user input and interaction.
     InitializeGlfwCallbacks(window);
 
-    // Create the initial set of objects and measure the time taken for object creation.
-    auto startTime = std::chrono::high_resolution_clock::now();
+    // Keep the normal simulation diagnostics out of the numerical-only test run.
+    const auto startTime = runNumericalBenchmark
+                               ? std::chrono::high_resolution_clock::time_point{}
+                               : std::chrono::high_resolution_clock::now();
     objs = CreateObjects({}, numRandomObjects);
-    std::cout << "Object list: " << std::endl;
-    for (size_t i = 0; i < objs.size(); ++i)
+    if (!runNumericalBenchmark)
     {
-        const Object &obj = objs[i];
-        std::cout << "Object " << i + 1 << ":";
-        std::cout << "   Mass: " << obj.mass << std::endl;
-        std::cout << "   Radius: " << obj.radius << std::endl;
-        std::cout << "   Position: " << obj.position.x << ", " << obj.position.y << ", "
-                  << obj.position.z << std::endl;
-        std::cout << "   Velocity: " << obj.velocity.x << ", " << obj.velocity.y << ", "
-                  << obj.velocity.z << std::endl;
-        std::cout << "   Density: " << obj.density << std::endl;
+        std::cout << "Object list: " << std::endl;
+        for (size_t i = 0; i < objs.size(); ++i)
+        {
+            const Object &obj = objs[i];
+            std::cout << "Object " << i + 1 << ":";
+            std::cout << "   Mass: " << obj.mass << std::endl;
+            std::cout << "   Radius: " << obj.radius << std::endl;
+            std::cout << "   Position: " << obj.position.x << ", " << obj.position.y << ", "
+                      << obj.position.z << std::endl;
+            std::cout << "   Velocity: " << obj.velocity.x << ", " << obj.velocity.y << ", "
+                      << obj.velocity.z << std::endl;
+            std::cout << "   Density: " << obj.density << std::endl;
+        }
+        const auto endObjectTime = std::chrono::high_resolution_clock::now();
+        const auto objectCreationDuration =
+            std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
+        std::cout << "Object creation time: " << objectCreationDuration.count() << " ms"
+                  << std::endl;
     }
-    auto endObjectTime = std::chrono::high_resolution_clock::now();
-    auto objectCreationDuration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(endObjectTime - startTime);
-    std::cout << "Object creation time: " << objectCreationDuration.count() << " ms" << std::endl;
     size_t objectCount = objs.size();
-    std::cout << "Initial object count: " << objectCount << std::endl;
+    if (!runNumericalBenchmark)
+    {
+        std::cout << "Initial object count: " << objectCount << std::endl;
+    }
 
     // Create shader programs, then initialize rendering uniforms and camera position.
     CreateShaderProgram(shaderPrograms);
@@ -93,7 +123,9 @@ int main()
     CreateUnitSphere();
 
     // Initialize the grid pipeline for GPU computation.
-    auto startGridTime = std::chrono::high_resolution_clock::now();
+    const auto startGridTime = runNumericalBenchmark
+                                   ? std::chrono::high_resolution_clock::time_point{}
+                                   : std::chrono::high_resolution_clock::now();
     std::vector<glm::vec4> gridVertices = CreateBaseGridGPU();
     std::vector<unsigned int> gridIndices = CreateGridIndices(gridDivisions);
 
@@ -102,12 +134,52 @@ int main()
     objectGpuState(0, objectCount);
     InitializeGridRenderingResources(gridVertices, gridIndices);
 
+    if (runMassAggregationBenchmark)
+    {
+        const std::string resultDirectory =
+            RunMassAggregationBenchmark(shaderPrograms.boundingBoxCompute,
+                                        shaderPrograms.octreeBuildCompute,
+                                        shaderPrograms.massAggregationCompute);
+        std::cout << "Mass aggregation benchmark results: " << resultDirectory << std::endl;
+        Cleanup(shaderPrograms);
+        return 0;
+    }
+    if (runAccelerationBenchmark)
+    {
+        const std::string resultDirectory =
+            RunAccelerationBenchmark(shaderPrograms, computeUniformLocations);
+        std::cout << "Acceleration benchmark results: " << resultDirectory << std::endl;
+        Cleanup(shaderPrograms);
+        return 0;
+    }
+    if (runTrajectoryBenchmark)
+    {
+        try
+        {
+            const std::string resultDirectory =
+                RunTrajectoryBenchmark(shaderPrograms, computeUniformLocations);
+            std::cout << "Trajectory benchmark results: " << resultDirectory << std::endl;
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Trajectory benchmark failed: " << error.what() << std::endl;
+            Cleanup(shaderPrograms);
+            return 1;
+        }
+        Cleanup(shaderPrograms);
+        return 0;
+    }
+
     // Initialize the grid compute pipeline with the base positions of the grid vertices.
-    auto endGridTime = std::chrono::high_resolution_clock::now();
-    std::cout << "Grid initialization time: "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime - startGridTime)
-                     .count()
-              << " ms" << std::endl;
+    if (!runNumericalBenchmark)
+    {
+        const auto endGridTime = std::chrono::high_resolution_clock::now();
+        std::cout << "Grid initialization time: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(endGridTime -
+                                                                           startGridTime)
+                         .count()
+                  << " ms" << std::endl;
+    }
 
     // mass aggregation
     std::cout << "Cell size: " << CEll_SIZE << std::endl;

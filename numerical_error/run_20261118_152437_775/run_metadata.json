@@ -1,0 +1,25 @@
+{
+  "phase": 1,
+  "name": "mass_aggregation",
+  "base_seed": 20261118,
+  "repetitions": 3,
+  "object_counts": [32, 128, 202],
+  "distributions": ["uniform", "clustered", "disk"],
+  "mass_range": [1.0e20, 3.0e23],
+  "uniform_position_range": [-12000.0, 12000.0],
+  "comparison_tolerance_absolute": 1.0e-6,
+  "comparison_tolerance_relative": 1.0e-5,
+  "mass_unit": "simulation mass unit",
+  "position_unit": "simulation distance unit",
+  "cases": [
+    {"distribution": "uniform", "object_count": 32, "seed": 20261150},
+    {"distribution": "uniform", "object_count": 128, "seed": 20261246},
+    {"distribution": "uniform", "object_count": 202, "seed": 20261320},
+    {"distribution": "clustered", "object_count": 32, "seed": 20262150},
+    {"distribution": "clustered", "object_count": 128, "seed": 20262246},
+    {"distribution": "clustered", "object_count": 202, "seed": 20262320},
+    {"distribution": "disk", "object_count": 32, "seed": 20263150},
+    {"distribution": "disk", "object_count": 128, "seed": 20263246},
+    {"distribution": "disk", "object_count": 202, "seed": 20263320}
+  ]
+}
